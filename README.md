@@ -1,6 +1,6 @@
 # SCRY 1.0
 
-SCRY is a PowerShell tool for network discovery. The tool scans local subnets. It identifies connected devices. It queries public network routing data.
+SCRY is a PowerShell tool for network discovery and wireless reconnaissance. The tool scans local subnets, surveys nearby Wi-Fi networks and access points, identifies connected devices, and queries public network routing data.
 
 ### Collected Device Data
 
@@ -10,6 +10,16 @@ SCRY is a PowerShell tool for network discovery. The tool scans local subnets. I
 - Hostname
 - Open TCP ports
 - Device category
+
+### Collected Wi-Fi & Wireless Data
+
+- Connected Wi-Fi adapter state, SSID, BSSID, and link speeds (Rx / Tx Mbps)
+- Nearby visible SSIDs (including hidden networks)
+- Access point BSSID (MAC address) and hardware vendor
+- Signal quality percentage and ASCII signal strength bars
+- Radio standard (802.11ax, 802.11ac, 802.11n, etc.)
+- Channel frequency and band (2.4 GHz, 5 GHz, 6 GHz)
+- Security authentication (WPA3-Personal, WPA2-Personal, Open) and cipher
 
 ### Collected External Network Data
 
@@ -27,66 +37,77 @@ Run `.\scry.ps1` or `scan.bat` without parameters to start the menu interface:
 =================================================================
  [SCRY]
 =================================================================
- Target Interface : Ethernet
- Target Subnet    : 192.168.86.0/24 (254 Hosts)
- Default Gateway  : 192.168.86.1
- This PC Local IP : 192.168.86.249
+ Target Interface : Wi-Fi (Connected: "5G_Router_B517AF" | 78% Signal)
+ Target Subnet    : 192.168.32.0/24 (254 Hosts)
+ Default Gateway  : 192.168.32.1
+ This PC Local IP : 192.168.32.44
  Public / WAN IP  : 95.196.109.76 (Telia Company AB - Sweden)
 -----------------------------------------------------------------
- [1] Start Scan  (Standard: Devices, Hostnames, Top Ports) [Default]
- [2] Deep Scan   (Extended: 25+ Ports & Web Banners)
- [3] Quick Scan  (Fast Discovery: ARP + Ping + DNS)
+ [1] Start Scan   (Standard: Devices, Hostnames, Top Ports) [Default]
+ [2] Deep Scan    (Comprehensive: 25+ Ports & Web Banners)
+ [3] Quick Scan   (Fast Discovery: ARP + Ping + DNS)
  [4] Switch Adapter / Custom Subnet
+ [5] Wi-Fi Survey (Nearby SSIDs, Channels & Signal Strengths)
  [0] Exit
 =================================================================
- Select an option [0-4] (Press ENTER for [1]):
+ Select an option [0-5] (Press ENTER for [1]):
 ```
 
 ### Verified Header & Menu Options
 
-- **Header Check**: The header check reads the active network adapter, local IP address, gateway IP address, and internet connection. It prompts for a DHCP renewal if no valid IP address exists.
-- **`[1]` Start Scan (Default)**: This option scans the subnet with ARP, ICMP, DNS, NetBIOS, diagnostic ports, and HTTP headers. It saves output to a new report folder. Press ENTER to run this scan.
-- **`[2]` Deep Scan**: This option scans 25 service ports. It captures SSL and HTTP banners.
-- **`[3]` Quick Scan**: This option scans the subnet with ARP, ICMP ping, and DNS only.
-- **`[4]` Switch Adapter / Custom Subnet**: This option selects a different network adapter. You can specify a target IP range or CIDR subnet. You can also trigger a DHCP renewal.
-- **`[0]` Exit**: This option closes the script.
+- **Header Check**: The header check reads the active network adapter (including connected SSID and signal strength), local IP address, gateway IP address, and internet connection. It prompts for a DHCP renewal if no valid IP address exists.
+- **`[1]` Start Scan (Default)**: Scans the subnet with ARP, ICMP, DNS, NetBIOS, diagnostic ports, and HTTP headers. Automatically includes a Wi-Fi snapshot and nearby SSIDs in the reports. Press ENTER to run this scan.
+- **`[2]` Deep Scan**: Scans 25 service ports and captures SSL and HTTP banners across the subnet.
+- **`[3]` Quick Scan**: Scans the subnet with ARP, ICMP ping, and DNS only.
+- **`[4]` Switch Adapter / Custom Subnet**: Selects a different network adapter, specifies a target IP range or CIDR subnet, or triggers DHCP renewal.
+- **`[5]` Wi-Fi Survey**: Performs an instant wireless survey of all nearby SSIDs and access points around the host without scanning IP subnets. Displays a formatted console table with live options to Rescan (`[R]`), Export to CSV/JSON (`[E]`), or return to Menu (`[M]`).
+- **`[0]` Exit**: Closes the script.
 
 ---
 
 ## Key Features
 
+- **Wi-Fi & Wireless Environment Survey**:
+  - Automatically captures the connected Wi-Fi interface details (SSID, BSSID, AP vendor, link rates, channel, band, security) and nearby access points during subnet scans.
+  - Interactive standalone Wi-Fi survey menu `[5]` for instant wireless spectrum reconnaissance without IP scanning.
+  - Computes exact channels, frequency bands (2.4 GHz, 5 GHz, 6 GHz), and resolves access point hardware manufacturers.
+  - Generates HTML interactive tables with signal meters and dedicated CSV / JSON export files (`wifi_survey.json`).
 - **Public IP and Geolocation**:
   - The tool queries `ip-api.com`, `ipinfo.io`, and `api.ipify.org`.
-  - It resolves the public IP address, hostname, ISP, ASN, country, city, and coordinates.
-  - The scan continues if external lookups fail or when the system is offline.
+  - Resolves the public IP address, hostname, ISP, ASN, country, city, and coordinates.
+  - The scan continues seamlessly if external lookups fail or when the system is offline.
 - **Link and DHCP Verification**:
-  - The tool checks for a valid local IPv4 address and default gateway before scanning.
-  - It flushes DNS and requests a new DHCP lease when Windows lacks a valid IP address.
+  - Checks for a valid local IPv4 address and default gateway before scanning.
+  - Flushes DNS and requests a new DHCP lease when Windows lacks a valid IP address.
 - **Report Generation**:
-  - The tool writes scan results to `Reports/YYYY-MM-DD_HH-mm-ss/`.
-  - It creates five output files:
-    - `report.html` (Interactive dashboard with search filter and WAN data)
+  - Writes scan results to `Reports/YYYY-MM-DD_HH-mm-ss/`.
+  - Creates comprehensive output files:
+    - `report.html` (Interactive dashboard with search filter, WAN intelligence, and Wi-Fi survey table)
     - `devices.csv` (Device list in CSV format)
     - `devices.json` (Device list in JSON format)
-    - `network_info.json` (Network and WAN metadata in JSON format)
+    - `wifi_survey.json` (Nearby Wi-Fi networks and access points in JSON format)
+    - `network_info.json` (Subnet, Wi-Fi context, and WAN metadata in JSON format)
     - `summary.txt` (Scan summary in plain text format)
 - **Interface and Subnet Detection**:
-  - The tool detects the active network adapter, local IP address, default gateway, and subnet mask.
+  - Automatically detects the active network adapter, local IP address, default gateway, and subnet mask.
 - **Asynchronous Scanner Engine**:
   - The engine uses Win32 `SendARP` API calls and .NET socket tasks for concurrent scanning.
 - **Layer 2 ARP Discovery**:
-  - The tool finds active devices through ARP when firewalls drop ICMP ping packets.
-- **Vendor Identification**:
-  - The tool resolves device manufacturers with an embedded IEEE MAC OUI database.
+  - Finds active devices through ARP when firewalls drop ICMP ping packets.
+- **Vendor Identification & Extensible OUI Database (`oui.txt`)**:
+  - Resolves device manufacturers through an external, customizable IEEE MAC OUI database file ([`oui.txt`](file:///C:/dropbox/_github/scry/oui.txt)) containing 1,100+ hardware vendors (routers, PCs, IoT, printers, gaming consoles, smart TVs, and access points).
+  - Easily extend the database by adding new lines to `oui.txt` (supports `OUI\tVendor`, `00:11:22 = Vendor`, `00-11-22,Vendor`, or comments `#`).
+  - Includes a built-in core fallback table if `oui.txt` is missing.
+  - Optional `-OnlineLookup` parameter queries the maclookup API for unlisted vendor prefixes.
 - **Randomized MAC Detection**:
-  - The tool flags private and randomized MAC addresses from mobile and desktop operating systems.
+  - Flags private and randomized MAC addresses from mobile and desktop operating systems.
 - **Host Fingerprinting**:
-  - **Reverse DNS**: The tool resolves hostnames through local DNS servers.
-  - **NetBIOS (UDP 137)**: The tool reads Windows computer names and workgroups without authentication.
-  - **Diagnostic Port Probing**: The tool tests common management ports such as SSH, Telnet, HTTP, HTTPS, SMB, and RDP.
-  - **Web Title Grabber**: The tool captures web server headers and HTML `<title>` tags.
+  - **Reverse DNS**: Resolves hostnames through local DNS servers.
+  - **NetBIOS (UDP 137)**: Reads Windows computer names and workgroups without authentication.
+  - **Diagnostic Port Probing**: Tests common management ports such as SSH, Telnet, HTTP, HTTPS, SMB, and RDP.
+  - **Web Title Grabber**: Captures web server headers and HTML `<title>` tags.
 - **Device Classification**:
-  - The tool assigns device categories such as Gateway, Windows PC, Printer, NAS, IoT, Smart TV, or Virtual Machine.
+  - Assigns device categories such as Gateway, Windows PC, Printer, NAS, IoT, Smart TV, or Virtual Machine.
 
 ---
 
@@ -108,6 +129,11 @@ scan.bat
 
 Pass command-line arguments to run scans without the interactive menu:
 
+#### Run Wi-Fi survey only (without IP scan):
+```powershell
+.\scry.ps1 -WifiOnly
+```
+
 #### Run a deep scan and open the HTML report:
 ```powershell
 .\scry.ps1 -DeepScan -OpenReport
@@ -123,9 +149,9 @@ Pass command-line arguments to run scans without the interactive menu:
 .\scry.ps1 -QuickScan
 ```
 
-#### Scan an offline network and skip the WAN lookup:
+#### Scan an offline network and skip WAN & Wi-Fi lookups:
 ```powershell
-.\scry.ps1 -SkipWanCheck
+.\scry.ps1 -SkipWanCheck -SkipWifi
 ```
 
 #### Scan a specific subnet or IP range:
@@ -151,6 +177,8 @@ $devices | Where-Object DeviceType -match 'Printer' | Format-Table IP, MAC, Vend
 | :--- | :--- | :--- | :--- |
 | `-Menu` | Switch | `False` | Opens the interactive menu when other parameters are present. |
 | `-NonInteractive` | Switch | `False` | Runs the scan directly without displaying the menu. |
+| `-WifiOnly` | Switch | `False` | Surveys nearby Wi-Fi networks (SSIDs, BSSIDs, signal, channels) without scanning IP subnets. |
+| `-SkipWifi` | Switch | `False` | Skips Wi-Fi discovery and nearby SSID survey during subnet scans. |
 | `-SkipWanCheck` | Switch | `False` | Skips the public IP and geolocation lookup. |
 | `-WanTimeoutSec` | Int | `3` | Sets the timeout in seconds for the WAN lookup. |
 | `-RenewDhcp` | Switch | `False` | Flushes DNS and requests a new DHCP lease before scanning. |
@@ -175,16 +203,15 @@ Each scan creates a timestamped folder with report files:
 
 ```text
 Reports/
-├── 2026-08-19_08-22-54/
-│   ├── report.html       (Interactive dashboard with search filter and WAN data)
+├── 2026-08-24_13-33-17/
+│   ├── report.html       (Interactive dashboard with search filter, WAN intelligence, and Wi-Fi survey table)
 │   ├── devices.csv       (Device list in CSV format)
 │   ├── devices.json      (Device list in JSON format)
-│   ├── network_info.json (Network and WAN metadata in JSON format)
+│   ├── wifi_survey.json  (Nearby Wi-Fi networks and access points in JSON format)
+│   ├── network_info.json (Subnet, Wi-Fi context, and WAN metadata in JSON format)
 │   └── summary.txt       (Scan summary in plain text format)
-└── 2026-08-19_08-23-03/
-    ├── report.html
-    ├── devices.csv
-    ├── devices.json
-    ├── network_info.json
-    └── summary.txt
+└── Surveys/
+    └── 2026-08-24_11-25-30/
+        ├── wifi_survey.csv
+        └── wifi_survey.json
 ```

@@ -1,0 +1,9 @@
+# Scan Reports & Surveys
+/Reports/
+/reports/
+Reports/
+reports/
+
+# Temporary and Log files
+*.tmp
+*.log

@@ -19,6 +19,7 @@
     - Probes standard management ports: SSH, Telnet, DNS, HTTP, HTTPS, SMB, and RDP.
     - Captures HTTP server banners and web page titles.
     - Classifies devices: Router, PC, Printer, NAS, IoT, Smart TV, or Virtual Machine.
+    - Surveys nearby Wi-Fi SSIDs, BSSIDs, signal strengths, channels, bands, and security encryption.
     - Saves scan output in HTML, CSV, JSON, and plain text formats.
 
 .PARAMETER Subnet
@@ -61,6 +62,12 @@
 .PARAMETER DeepScan
     Scans 25 service ports, HTTP titles, and SSL certificates.
 
+.PARAMETER WifiOnly
+    Scans nearby Wi-Fi SSIDs and wireless environment only. Skips IP subnet scanning.
+
+.PARAMETER SkipWifi
+    Disables nearby Wi-Fi network discovery during network scans.
+
 .PARAMETER OnlineLookup
     Enables online API lookups for unlisted MAC vendor OUIs.
 
@@ -98,6 +105,10 @@
 .EXAMPLE
     .\scry.ps1 -DeepScan -OpenReport
     Runs a deep scan and opens the HTML report in the browser.
+
+.EXAMPLE
+    .\scry.ps1 -WifiOnly
+    Surveys all nearby Wi-Fi SSIDs, channels, signal strengths, and AP vendors.
 
 .EXAMPLE
     .\scry.ps1 -Subnet "192.168.1.0/24" -ExportCsv "devices.csv"
@@ -144,6 +155,12 @@ param(
 
     [Parameter(HelpMessage = "Deep mode: Extended port probing & banner grabbing")]
     [switch]$DeepScan,
+
+    [Parameter(HelpMessage = "Scan nearby Wi-Fi SSIDs and wireless environment only")]
+    [switch]$WifiOnly,
+
+    [Parameter(HelpMessage = "Skip nearby Wi-Fi network survey")]
+    [switch]$SkipWifi,
 
     [Parameter(HelpMessage = "Query online MAC vendor APIs for unknown OUIs")]
     [switch]$OnlineLookup,
@@ -651,235 +668,156 @@ namespace FastNetScanner
             Task.WaitAll(tasks.ToArray());
             return results;
         }
+
+        [DllImport("wlanapi.dll")]
+        public static extern int WlanOpenHandle(uint dwClientVersion, IntPtr pReserved, out uint pdwNegotiatedVersion, out IntPtr phClientHandle);
+
+        [DllImport("wlanapi.dll")]
+        public static extern int WlanCloseHandle(IntPtr hClientHandle, IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
+        public static extern int WlanEnumInterfaces(IntPtr hClientHandle, IntPtr pReserved, out IntPtr ppInterfaceList);
+
+        [DllImport("wlanapi.dll")]
+        public static extern int WlanScan(IntPtr hClientHandle, ref Guid pInterfaceGuid, IntPtr pDot11Ssid, IntPtr pIeData, IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
+        public static extern void WlanFreeMemory(IntPtr pMemory);
+
+        public static bool TriggerWlanScan(int waitMs = 2000)
+        {
+            IntPtr hClient = IntPtr.Zero;
+            try
+            {
+                uint negotiatedVer;
+                if (WlanOpenHandle(2, IntPtr.Zero, out negotiatedVer, out hClient) != 0) return false;
+                IntPtr pList = IntPtr.Zero;
+                if (WlanEnumInterfaces(hClient, IntPtr.Zero, out pList) == 0 && pList != IntPtr.Zero)
+                {
+                    try
+                    {
+                        uint count = (uint)Marshal.ReadInt32(pList);
+                        for (int i = 0; i < count; i++)
+                        {
+                            IntPtr pGuid = new IntPtr(pList.ToInt64() + 8 + (i * 532));
+                            byte[] guidBytes = new byte[16];
+                            Marshal.Copy(pGuid, guidBytes, 0, 16);
+                            Guid guid = new Guid(guidBytes);
+                            WlanScan(hClient, ref guid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                        }
+                    }
+                    finally
+                    {
+                        WlanFreeMemory(pList);
+                    }
+                }
+            }
+            catch { return false; }
+            finally
+            {
+                if (hClient != IntPtr.Zero) WlanCloseHandle(hClient, IntPtr.Zero);
+            }
+
+            if (waitMs > 0)
+            {
+                Thread.Sleep(waitMs);
+            }
+            return true;
+        }
     }
 }
 '@
-    Add-Type -TypeDefinition $cSharpCode -Language CSharp
+    Add-Type -TypeDefinition $cSharpCode -Language CSharp -IgnoreWarnings -WarningAction SilentlyContinue
 }
 
 # ====================================================================
-# 2. EMBEDDED OUI VENDOR LOOKUP DATABASE (500+ Top Vendors)
+# 2. IEEE MAC OUI VENDOR LOOKUP (External Database & Dynamic Loader)
 # ====================================================================
-$script:MacOuiDatabase = @{
-    # Raspberry Pi Foundation
-    'B827EB' = 'Raspberry Pi Foundation'; 'DCA632' = 'Raspberry Pi Foundation'; 'E45F01' = 'Raspberry Pi Foundation'
-    '28CDC1' = 'Raspberry Pi Foundation'; 'D83ADD' = 'Raspberry Pi Foundation'; '2CCF67' = 'Raspberry Pi Foundation'
+$script:MacOuiDatabase = $null
 
-    # Espressif IoT (ESP8266, ESP32, Smart Plugs, WLED, Tasmota)
-    '18FE34' = 'Espressif Inc (IoT/ESP)'; '240AC4' = 'Espressif Inc (IoT/ESP)'; '2462AB' = 'Espressif Inc (IoT/ESP)'
-    '246F28' = 'Espressif Inc (IoT/ESP)'; '24B2DE' = 'Espressif Inc (IoT/ESP)'; '2C3AE8' = 'Espressif Inc (IoT/ESP)'
-    '2CF432' = 'Espressif Inc (IoT/ESP)'; '30AEA4' = 'Espressif Inc (IoT/ESP)'; '3C6105' = 'Espressif Inc (IoT/ESP)'
-    '3C71BF' = 'Espressif Inc (IoT/ESP)'; '4022D8' = 'Espressif Inc (IoT/ESP)'; '40F520' = 'Espressif Inc (IoT/ESP)'
-    '441793' = 'Espressif Inc (IoT/ESP)'; '483FDA' = 'Espressif Inc (IoT/ESP)'; '485519' = 'Espressif Inc (IoT/ESP)'
-    '4C11AE' = 'Espressif Inc (IoT/ESP)'; '4C7525' = 'Espressif Inc (IoT/ESP)'; '500291' = 'Espressif Inc (IoT/ESP)'
-    '5443B2' = 'Espressif Inc (IoT/ESP)'; '545AA6' = 'Espressif Inc (IoT/ESP)'; '5CCF7F' = 'Espressif Inc (IoT/ESP)'
-    '600194' = 'Espressif Inc (IoT/ESP)'; '68C63A' = 'Espressif Inc (IoT/ESP)'; '70039F' = 'Espressif Inc (IoT/ESP)'
-    '7CDFA1' = 'Espressif Inc (IoT/ESP)'; '807D3A' = 'Espressif Inc (IoT/ESP)'; '840D8E' = 'Espressif Inc (IoT/ESP)'
-    '84F3EB' = 'Espressif Inc (IoT/ESP)'; '8CAAB5' = 'Espressif Inc (IoT/ESP)'; '9097D5' = 'Espressif Inc (IoT/ESP)'
-    '94B97E' = 'Espressif Inc (IoT/ESP)'; '98CDAC' = 'Espressif Inc (IoT/ESP)'; 'A020A6' = 'Espressif Inc (IoT/ESP)'
-    'A4CF12' = 'Espressif Inc (IoT/ESP)'; 'A4E57C' = 'Espressif Inc (IoT/ESP)'; 'AC67B2' = 'Espressif Inc (IoT/ESP)'
-    'B4E62D' = 'Espressif Inc (IoT/ESP)'; 'BCDDD2' = 'Espressif Inc (IoT/ESP)'; 'C44F33' = 'Espressif Inc (IoT/ESP)'
-    'C82B96' = 'Espressif Inc (IoT/ESP)'; 'CC50E3' = 'Espressif Inc (IoT/ESP)'; 'D8A01D' = 'Espressif Inc (IoT/ESP)'
-    'DC4F22' = 'Espressif Inc (IoT/ESP)'; 'EC6260' = 'Espressif Inc (IoT/ESP)'; 'ECFABC' = 'Espressif Inc (IoT/ESP)'
+function Get-MacOuiDatabase {
+    if ($script:MacOuiDatabase -ne $null -and $script:MacOuiDatabase.Count -gt 0) {
+        return $script:MacOuiDatabase
+    }
 
-    # Apple
-    '000393' = 'Apple'; '000502' = 'Apple'; '000A27' = 'Apple'; '000A95' = 'Apple'; '000D93' = 'Apple'
-    '0010FA' = 'Apple'; '001124' = 'Apple'; '001451' = 'Apple'; '0016CB' = 'Apple'; '0017F2' = 'Apple'
-    '0019E3' = 'Apple'; '001B63' = 'Apple'; '001CB3' = 'Apple'; '001D4F' = 'Apple'; '001E52' = 'Apple'
-    '001EC2' = 'Apple'; '001F5B' = 'Apple'; '001FF3' = 'Apple'; '0021E9' = 'Apple'; '002241' = 'Apple'
-    '002312' = 'Apple'; '002332' = 'Apple'; '00236C' = 'Apple'; '0023DF' = 'Apple'; '002436' = 'Apple'
-    '002500' = 'Apple'; '00254B' = 'Apple'; '0025BC' = 'Apple'; '002608' = 'Apple'; '00264A' = 'Apple'
-    '040CCE' = 'Apple'; '041552' = 'Apple'; '042665' = 'Apple'; '04489A' = 'Apple'; '044BED' = 'Apple'
-    '080007' = 'Apple'; '086698' = 'Apple'; '087045' = 'Apple'; '087402' = 'Apple'; '08E689' = 'Apple'
-    '0C1539' = 'Apple'; '0C3021' = 'Apple'; '0C4DE9' = 'Apple'; '0C5101' = 'Apple'; '0C74C2' = 'Apple'
-    '101C0C' = 'Apple'; '1040F3' = 'Apple'; '1093E9' = 'Apple'; '1094BB' = 'Apple'; '109ADD' = 'Apple'
-    '14109F' = 'Apple'; '14205E' = 'Apple'; '145A05' = 'Apple'; '147DC5' = 'Apple'; '1499E2' = 'Apple'
-    '183451' = 'Apple'; '186590' = 'Apple'; '18AF61' = 'Apple'; '18E728' = 'Apple'; '18EE69' = 'Apple'
-    '207D74' = 'Apple'; '20A2E4' = 'Apple'; '20AB37' = 'Apple'; '20EE28' = 'Apple'; '24240E' = 'Apple'
-    '280B5C' = 'Apple'; '286ABA' = 'Apple'; '28CFDA' = 'Apple'; '28CFE9' = 'Apple'; '28E02C' = 'Apple'
-    '30074D' = 'Apple'; '3090AB' = 'Apple'; '3408BC' = 'Apple'; '34159E' = 'Apple'; '34363B' = 'Apple'
-    '38484C' = 'Apple'; '38CA7D' = 'Apple'; '3C0754' = 'Apple'; '3C15C2' = 'Apple'; '3C22FB' = 'Apple'
-    '406C8F' = 'Apple'; '4098AD' = 'Apple'; '40A6D9' = 'Apple'; '440010' = 'Apple'; '442A60' = 'Apple'
-    '48437C' = 'Apple'; '48605F' = 'Apple'; '48D705' = 'Apple'; '4C3275' = 'Apple'; '4C57CA' = 'Apple'
-    '50BC96' = 'Apple'; '50EAD6' = 'Apple'; '542696' = 'Apple'; '544E90' = 'Apple'; '54724F' = 'Apple'
-    '600308' = 'Apple'; '60334B' = 'Apple'; '606720' = 'Apple'; '608B0E' = 'Apple'; '60A37D' = 'Apple'
-    '685B35' = 'Apple'; '68967B' = 'Apple'; '68A86D' = 'Apple'; '6C4008' = 'Apple'; '6C709F' = 'Apple'
-    '701124' = 'Apple'; '703EAC' = 'Apple'; '70708B' = 'Apple'; '70EF00' = 'Apple'; '748D08' = 'Apple'
-    '784F43' = 'Apple'; '787B8A' = 'Apple'; '7C04D0' = 'Apple'; '7C6D62' = 'Apple'; '7CF05F' = 'Apple'
-    '804971' = 'Apple'; '80E650' = 'Apple'; '843835' = 'Apple'; '84FCAC' = 'Apple'; '88665A' = 'Apple'
-    '8C2DAA' = 'Apple'; '8C8590' = 'Apple'; '9027E4' = 'Apple'; '907240' = 'Apple'; '90FD61' = 'Apple'
-    '9801A7' = 'Apple'; '985AEB' = 'Apple'; '98E0D9' = 'Apple'; '9C207B' = 'Apple'; '9C35EB' = 'Apple'
-    'A45E60' = 'Apple'; 'A4C361' = 'Apple'; 'A82066' = 'Apple'; 'A85B78' = 'Apple'; 'A8667F' = 'Apple'
-    'B065BD' = 'Apple'; 'B418D1' = 'Apple'; 'B8098A' = 'Apple'; 'B8782E' = 'Apple'; 'B8E856' = 'Apple'
-    'C0847A' = 'Apple'; 'C4B301' = 'Apple'; 'C82A14' = 'Apple'; 'C83C85' = 'Apple'; 'C869CD' = 'Apple'
-    'CC088D' = 'Apple'; 'CC29F5' = 'Apple'; 'D0034B' = 'Apple'; 'D023DB' = 'Apple'; 'D0817A' = 'Apple'
-    'DC2B61' = 'Apple'; 'DC56E7' = 'Apple'; 'E06678' = 'Apple'; 'E0B6F5' = 'Apple'; 'E4CE8F' = 'Apple'
-    'F01898' = 'Apple'; 'F07960' = 'Apple'; 'F0C1F1' = 'Apple'; 'F40F24' = 'Apple'; 'F437B7' = 'Apple'
-    'F81EDF' = 'Apple'; 'F83880' = 'Apple'; 'FC183C' = 'Apple'; 'FC257F' = 'Apple'; 'FCE998' = 'Apple'
+    $db = @{}
 
-    # TP-Link
-    '001D0F' = 'TP-Link'; '002719' = 'TP-Link'; '1027F5' = 'TP-Link'; '14CC20' = 'TP-Link'; '1C3BF3' = 'TP-Link'
-    '30DE4B' = 'TP-Link'; '50C7BF' = 'TP-Link'; '54AF97' = 'TP-Link'; '60A44C' = 'TP-Link'; '704F57' = 'TP-Link'
-    '7403BD' = 'TP-Link'; '788A20' = 'TP-Link'; '8416F9' = 'TP-Link'; '90F652' = 'TP-Link'; '98DAC4' = 'TP-Link'
-    'A0F3C1' = 'TP-Link'; 'AC84C6' = 'TP-Link'; 'B04E26' = 'TP-Link'; 'B09575' = 'TP-Link'; 'C006C3' = 'TP-Link'
-    'C025E9' = 'TP-Link'; 'C46E1F' = 'TP-Link'; 'C4E984' = 'TP-Link'; 'D80D17' = 'TP-Link'; 'E4C32A' = 'TP-Link'
-    'EC086B' = 'TP-Link'; 'EC172F' = 'TP-Link'; 'F4F26D' = 'TP-Link'; 'F81A67' = 'TP-Link'
+    # Locate external OUI database file
+    $searchPaths = @(
+        (Join-Path $PSScriptRoot "oui.txt"),
+        (Join-Path (Get-Location).Path "oui.txt"),
+        (Join-Path $PSScriptRoot "mac_oui.txt"),
+        (Join-Path (Get-Location).Path "mac_oui.txt")
+    )
 
-    # Ubiquiti Networks (UniFi)
-    '00156D' = 'Ubiquiti (UniFi)'; '002722' = 'Ubiquiti (UniFi)'; '0418D6' = 'Ubiquiti (UniFi)'; '18E829' = 'Ubiquiti (UniFi)'
-    '245A4C' = 'Ubiquiti (UniFi)'; '44D9E7' = 'Ubiquiti (UniFi)'; '687251' = 'Ubiquiti (UniFi)'; '68D79A' = 'Ubiquiti (UniFi)'
-    '708BCD' = 'Ubiquiti (UniFi)'; '7483C2' = 'Ubiquiti (UniFi)'; '784558' = 'Ubiquiti (UniFi)'; '802AA8' = 'Ubiquiti (UniFi)'
-    '9C05D6' = 'Ubiquiti (UniFi)'; 'AC8BA9' = 'Ubiquiti (UniFi)'; 'B4FBE4' = 'Ubiquiti (UniFi)'; 'DC9FDB' = 'Ubiquiti (UniFi)'
-    'E063DA' = 'Ubiquiti (UniFi)'; 'F09FC2' = 'Ubiquiti (UniFi)'; 'FCECDA' = 'Ubiquiti (UniFi)'
+    $dbFile = $null
+    foreach ($p in $searchPaths) {
+        if ($p -and (Test-Path -Path $p -PathType Leaf)) {
+            $dbFile = $p
+            break
+        }
+    }
 
-    # Netgear
-    '00095B' = 'Netgear'; '000FB5' = 'Netgear'; '00146C' = 'Netgear'; '00184D' = 'Netgear'; '001F33' = 'Netgear'
-    '0024B2' = 'Netgear'; '0026F2' = 'Netgear'; '04A151' = 'Netgear'; '08028E' = 'Netgear'; '10DA43' = 'Netgear'
-    '1459C0' = 'Netgear'; '200CC8' = 'Netgear'; '20E52A' = 'Netgear'; '288088' = 'Netgear'; '2C3033' = 'Netgear'
-    '4494FC' = 'Netgear'; '4C60DE' = 'Netgear'; '6CB0CE' = 'Netgear'; '841B5E' = 'Netgear'; '9C3DCF' = 'Netgear'
-    'A00460' = 'Netgear'; 'A42BB0' = 'Netgear'; 'B03956' = 'Netgear'; 'B07FB9' = 'Netgear'; 'C0FFD4' = 'Netgear'
-    'CC40D0' = 'Netgear'; 'E0469A' = 'Netgear'; 'E091F5' = 'Netgear'; 'E4F4C6' = 'Netgear'
+    if ($dbFile) {
+        try {
+            $lines = [System.IO.File]::ReadAllLines($dbFile, [System.Text.Encoding]::UTF8)
+            foreach ($line in $lines) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $t = $line.Trim()
+                if ($t.StartsWith('#') -or $t.StartsWith('//')) { continue }
 
-    # Cisco / Linksys
-    '00000C' = 'Cisco'; '000142' = 'Cisco'; '0001C7' = 'Cisco'; '0001C9' = 'Cisco'; '000216' = 'Cisco'
-    '000217' = 'Cisco'; '00024B' = 'Cisco'; '00027D' = 'Cisco'; '0002B9' = 'Cisco'; '0002FC' = 'Cisco'
-    '00036B' = 'Cisco'; '00044D' = 'Cisco'; '00049B' = 'Cisco'; '000653' = 'Cisco'; '000C85' = 'Cisco'
-    '001121' = 'Cisco'; '001201' = 'Cisco'; '00141B' = 'Cisco'; '0015C7' = 'Cisco'; '001759' = 'Cisco'
-    '001A30' = 'Cisco'; '001BD4' = 'Cisco'; '001C0E' = 'Cisco'; '002155' = 'Cisco'; '002414' = 'Cisco'
-    '00260B' = 'Cisco'; '080002' = 'Cisco'; '18EF63' = 'Cisco'; '203A07' = 'Cisco'; '58971E' = 'Cisco'
-    '68BDAB' = 'Cisco'; '708105' = 'Cisco'; '8843E1' = 'Cisco'; 'ACF2C5' = 'Cisco'; 'C47295' = 'Cisco'
-    'CCD539' = 'Cisco'; 'F4ACC1' = 'Cisco'
+                $sepMatch = [regex]::Match($t, '^([0-9A-Fa-f]{2}[:\-\.]?[0-9A-Fa-f]{2}[:\-\.]?[0-9A-Fa-f]{2})[\s\t=,|:]+(.+)$')
+                if ($sepMatch.Success) {
+                    $prefix = ($sepMatch.Groups[1].Value -replace '[:\-\.]', '').ToUpper()
+                    $vendor = $sepMatch.Groups[2].Value.Trim()
+                    if ($prefix.Length -ge 6 -and -not [string]::IsNullOrEmpty($vendor)) {
+                        $db[$prefix.Substring(0, 6)] = $vendor
+                    }
+                }
+            }
+        } catch { }
+    }
 
-    # ASUS
-    '000C6E' = 'ASUS'; '000EA6' = 'ASUS'; '0011D8' = 'ASUS'; '0013D4' = 'ASUS'; '0015F2' = 'ASUS'
-    '0018F3' = 'ASUS'; '001A92' = 'ASUS'; '001BFC' = 'ASUS'; '001D60' = 'ASUS'; '001E8C' = 'ASUS'
-    '002215' = 'ASUS'; '00248C' = 'ASUS'; '002618' = 'ASUS'; '04D9F5' = 'ASUS'; '08606E' = 'ASUS'
-    '086266' = 'ASUS'; '107B44' = 'ASUS'; '10BF48' = 'ASUS'; '14DDA9' = 'ASUS'; '1831BF' = 'ASUS'
-    '20CF30' = 'ASUS'; '244BFE' = 'ASUS'; '2C4D54' = 'ASUS'; '305A3A' = 'ASUS'; '38D547' = 'ASUS'
-    '40167E' = 'ASUS'; '50465D' = 'ASUS'; '54A050' = 'ASUS'; '704D7B' = 'ASUS'; '74D02B' = 'ASUS'
-    '88D7F6' = 'ASUS'; '90E6BA' = 'ASUS'; 'AC220B' = 'ASUS'; 'B06EBF' = 'ASUS'; 'BCEE7B' = 'ASUS'
-    'C87F54' = 'ASUS'; 'D850E6' = 'ASUS'; 'E03F49' = 'ASUS'; 'F02F74' = 'ASUS'; 'F07959' = 'ASUS'
+    # Embedded fallback entries in case external file is not present
+    if ($db.Count -eq 0) {
+        $fallbacks = @{
+            'B827EB' = 'Raspberry Pi Foundation'; 'DCA632' = 'Raspberry Pi Foundation'; 'E45F01' = 'Raspberry Pi Foundation'
+            '18FE34' = 'Espressif Inc (IoT/ESP)'; '240AC4' = 'Espressif Inc (IoT/ESP)'; '3C71BF' = 'Espressif Inc (IoT/ESP)'
+            '000393' = 'Apple'; '000502' = 'Apple'; '0010FA' = 'Apple'; '183451' = 'Apple'; '3C22FB' = 'Apple'; 'B8E856' = 'Apple'
+            '001D0F' = 'TP-Link'; '50C7BF' = 'TP-Link'; '7403BD' = 'TP-Link'; '98DAC4' = 'TP-Link'; 'C006C3' = 'TP-Link'
+            '00156D' = 'Ubiquiti (UniFi)'; '245A4C' = 'Ubiquiti (UniFi)'; '7483C2' = 'Ubiquiti (UniFi)'; 'AC8BA9' = 'Ubiquiti (UniFi)'
+            '00095B' = 'Netgear'; '200CC8' = 'Netgear'; 'A00460' = 'Netgear'; 'C0FFD4' = 'Netgear'
+            '00000C' = 'Cisco'; '001A30' = 'Cisco'; '080002' = 'Cisco'; '58971E' = 'Cisco'
+            '000C6E' = 'ASUS'; '04D9F5' = 'ASUS'; '14DDA9' = 'ASUS'; 'AC220B' = 'ASUS'
+            '000C42' = 'MikroTik'; '488F5A' = 'MikroTik'; '744D28' = 'MikroTik'
+            '00040E' = 'AVM (FRITZ!Box)'; '3431C4' = 'AVM (FRITZ!Box)'
+            '001132' = 'Synology'; '00089B' = 'QNAP'
+            '00FC8B' = 'Amazon (Echo/Ring/Fire)'; '44650D' = 'Amazon (Echo/Ring/Fire)'; '84D6D0' = 'Amazon (Echo/Ring/Fire)'
+            '001A11' = 'Google'; '1097BD' = 'Google (Nest/Home)'; '3C3174' = 'Google (Nest Wifi)'; '546009' = 'Google'
+            '0007AB' = 'Samsung'; '001247' = 'Samsung'; '380A94' = 'Samsung'; 'BC4486' = 'Samsung'
+            '105AF7' = 'Tuya (Smart Life IoT)'; '20F41B' = 'Tuya (Smart Life IoT)'; '708976' = 'Tuya (Smart Life IoT)'
+            '009EC8' = 'Xiaomi'; '185936' = 'Xiaomi'; '742344' = 'Xiaomi'
+            '000E58' = 'Sonos'; '347E5C' = 'Sonos'; '5CAAFD' = 'Sonos'
+            '000D4B' = 'Roku'; '20EFBD' = 'Roku'; 'B0A737' = 'Roku'
+            '001788' = 'Philips Hue (Signify)'; 'ECB5FA' = 'Philips Hue (Signify)'
+            '0001E6' = 'HP'; '0017A4' = 'HP'; '082E5F' = 'HP'; '308D99' = 'HP'; '705A0F' = 'HP'
+            '000085' = 'Canon'; '001BA9' = 'Brother'; '000048' = 'Epson'; '000074' = 'Ricoh'
+            '00065B' = 'Dell'; '180373' = 'Dell'; '3417EB' = 'Dell'; '74867A' = 'Dell'
+            '0012FE' = 'Lenovo'; '207693' = 'Lenovo'; '6099D1' = 'Lenovo'
+            '0002B3' = 'Intel'; '001E67' = 'Intel'; '84A93E' = 'Intel'; 'F8633F' = 'Intel'
+            '000732' = 'Realtek'; '5404A6' = 'Realtek'; 'FC3497' = 'Realtek'
+            '0003FF' = 'Microsoft'; '00155D' = 'Microsoft (Hyper-V)'; '281878' = 'Microsoft'; '706655' = 'Microsoft'
+            '00014A' = 'Sony'; '0009BF' = 'Nintendo'; '0019A1' = 'LG'
+            '0024D4' = 'Sagemcom'; '103C59' = 'Sagemcom'; '541F8D' = 'Sagemcom'
+            '00055D' = 'D-Link'; '0002CF' = 'Zyxel'; '000B86' = 'Aruba (HPE)'; '0015CE' = 'Arris/Motorola'
+            '001E10' = 'Huawei'; '001E73' = 'ZTE'; '50FF20' = 'Keenetic'
+            '000569' = 'VMware'; '000C29' = 'VMware'; '080027' = 'Oracle VirtualBox'; '525400' = 'QEMU / KVM / Proxmox VM'
+        }
+        foreach ($k in $fallbacks.Keys) { $db[$k] = $fallbacks[$k] }
+    }
 
-    # MikroTik
-    '000C42' = 'MikroTik'; '2CC81B' = 'MikroTik'; '488F5A' = 'MikroTik'; '64D154' = 'MikroTik'; '6C3B6B' = 'MikroTik'
-    '744D28' = 'MikroTik'; '789A18' = 'MikroTik'; 'B869F4' = 'MikroTik'; 'C4AD34' = 'MikroTik'; 'D401C3' = 'MikroTik'; 'E48D8C' = 'MikroTik'
-
-    # AVM FRITZ!Box
-    '00040E' = 'AVM (FRITZ!Box)'; '00150C' = 'AVM (FRITZ!Box)'; '001A4F' = 'AVM (FRITZ!Box)'; '001C4A' = 'AVM (FRITZ!Box)'
-    '0024FE' = 'AVM (FRITZ!Box)'; '2C3996' = 'AVM (FRITZ!Box)'; '3431C4' = 'AVM (FRITZ!Box)'; '3810D5' = 'AVM (FRITZ!Box)'
-    '444E6D' = 'AVM (FRITZ!Box)'; '70C922' = 'AVM (FRITZ!Box)'; '9CC7A6' = 'AVM (FRITZ!Box)'; 'C02506' = 'AVM (FRITZ!Box)'; 'DC396F' = 'AVM (FRITZ!Box)'
-
-    # Synology & QNAP
-    '001132' = 'Synology'; '245EBE' = 'Synology / QNAP'; '001395' = 'Synology'; '00089B' = 'QNAP'
-
-    # Amazon (Echo, Ring, Blink, Fire TV)
-    '00FC8B' = 'Amazon (Echo/Ring/Fire)'; '0C47C9' = 'Amazon (Echo/Ring/Fire)'; '18742E' = 'Amazon (Echo/Ring/Fire)'
-    '244CE3' = 'Amazon (Echo/Ring/Fire)'; '34D270' = 'Amazon (Echo/Ring/Fire)'; '38F73D' = 'Amazon (Echo/Ring/Fire)'
-    '40B4CD' = 'Amazon (Echo/Ring/Fire)'; '44650D' = 'Amazon (Echo/Ring/Fire)'; '4844F7' = 'Amazon (Echo/Ring/Fire)'
-    '50DCE7' = 'Amazon (Echo/Ring/Fire)'; '6837E9' = 'Amazon (Echo/Ring/Fire)'; '68545A' = 'Amazon (Echo/Ring/Fire)'
-    '747548' = 'Amazon (Echo/Ring/Fire)'; '74C246' = 'Amazon (Echo/Ring/Fire)'; '84D6D0' = 'Amazon (Echo/Ring/Fire)'
-    '8871B1' = 'Amazon (Echo/Ring/Fire)'; 'AC63BE' = 'Amazon (Echo/Ring/Fire)'; 'B47C9C' = 'Amazon (Echo/Ring/Fire)'
-    'CC9E00' = 'Amazon (Echo/Ring/Fire)'; 'F0272D' = 'Amazon (Echo/Ring/Fire)'; 'FC65DE' = 'Amazon (Echo/Ring/Fire)'; 'FCA667' = 'Amazon (Echo/Ring/Fire)'
-
-    # Google (Nest, Chromecast, Home)
-    '001A11' = 'Google'; '1097BD' = 'Google (Nest/Home)'; '1C56FE' = 'Google'; '20DFB9' = 'Google'; '3C3174' = 'Google (Nest Wifi)'; '3C5A37' = 'Google'; '48D6D5' = 'Google'
-    '546009' = 'Google'; '6CADF8' = 'Google'; '70EE50' = 'Google'; '94EBCD' = 'Google'; 'A47733' = 'Google'
-    'D86C63' = 'Google'; 'E4F042' = 'Google'; 'F40304' = 'Google'; 'F4F5D8' = 'Google'; 'F80FF9' = 'Google'; 'F88FC2' = 'Google'
-
-    # Samsung
-    '0007AB' = 'Samsung'; '001247' = 'Samsung'; '001599' = 'Samsung'; '001632' = 'Samsung'; '0017C9' = 'Samsung'
-    '001A8A' = 'Samsung'; '001C43' = 'Samsung'; '001D25' = 'Samsung'; '0021D1' = 'Samsung'; '0023D6' = 'Samsung'
-    '002637' = 'Samsung'; '0808C2' = 'Samsung'; '14F42A' = 'Samsung'; '1C66AA' = 'Samsung'; '244B03' = 'Samsung'
-    '289A4B' = 'Samsung'; '30CDA7' = 'Samsung'; '34BE00' = 'Samsung'; '380A94' = 'Samsung'; '400E85' = 'Samsung'
-    '44F459' = 'Samsung'; '4849C7' = 'Samsung'; '508569' = 'Samsung'; '5492BE' = 'Samsung'; '5CE8EB' = 'Samsung'
-    '606BBD' = 'Samsung'; '641CAE' = 'Samsung'; '78471D' = 'Samsung'; '8425DB' = 'Samsung'; '88329B' = 'Samsung'
-    '94350A' = 'Samsung'; 'A0821F' = 'Samsung'; 'A80600' = 'Samsung'; 'AC5F3E' = 'Samsung'; 'B0C4E7' = 'Samsung'
-    'BC4486' = 'Samsung'; 'C0BDD1' = 'Samsung'; 'C81479' = 'Samsung'; 'CCF9E8' = 'Samsung'; 'D059E4' = 'Samsung'
-    'E47CF9' = 'Samsung'; 'F0EE10' = 'Samsung'; 'F47B5E' = 'Samsung'; 'F8042E' = 'Samsung'
-
-    # Tuya (Smart Life / Smart Home)
-    '105AF7' = 'Tuya (Smart Life IoT)'; '20F41B' = 'Tuya (Smart Life IoT)'; '403F8C' = 'Tuya (Smart Life IoT)'
-    '508A06' = 'Tuya (Smart Life IoT)'; '68572D' = 'Tuya (Smart Life IoT)'; '708976' = 'Tuya (Smart Life IoT)'
-    '7C87CE' = 'Tuya (Smart Life IoT)'; 'A09208' = 'Tuya (Smart Life IoT)'; 'D81F12' = 'Tuya (Smart Life IoT)'
-
-    # Xiaomi / Yeelight
-    '009EC8' = 'Xiaomi'; '04CF8C' = 'Xiaomi'; '14F65A' = 'Xiaomi'; '185936' = 'Xiaomi'; '286C07' = 'Xiaomi'
-    '34800D' = 'Xiaomi'; '38A4ED' = 'Xiaomi'; '50642B' = 'Xiaomi'; '584498' = 'Xiaomi'; '640980' = 'Xiaomi'
-    '742344' = 'Xiaomi'; '7802F8' = 'Xiaomi'; '7C49EB' = 'Xiaomi'; '8CBEBE' = 'Xiaomi'; '98FAE3' = 'Xiaomi'
-    'ACC1EE' = 'Xiaomi'; 'C40BCB' = 'Xiaomi'; 'F0B429' = 'Xiaomi'
-
-    # Sonos
-    '000E58' = 'Sonos'; '347E5C' = 'Sonos'; '48A6B8' = 'Sonos'; '5CAAFD' = 'Sonos'; '7828CA' = 'Sonos'; '949F3E' = 'Sonos'; 'B8E937' = 'Sonos'
-
-    # Roku
-    '000D4B' = 'Roku'; '080581' = 'Roku'; '20EFBD' = 'Roku'; '2AEFBD' = 'Roku'; '7CA81C' = 'Roku'
-    '84EAED' = 'Roku'; 'AC3A7A' = 'Roku'; 'B0A737' = 'Roku'; 'C83A6B' = 'Roku'; 'CC6DA0' = 'Roku'; 'D83134' = 'Roku'
-
-    # Philips / Signify (Hue)
-    '001788' = 'Philips Hue (Signify)'; 'ECB5FA' = 'Philips Hue (Signify)'
-
-    # HP (Hewlett-Packard Printers & PCs)
-    '0001E6' = 'HP'; '0002A5' = 'HP'; '000802' = 'HP'; '000BCD' = 'HP'; '000E7F' = 'HP'; '000F20' = 'HP'
-    '00110A' = 'HP'; '001279' = 'HP'; '001321' = 'HP'; '0014C2' = 'HP'; '001560' = 'HP'; '001635' = 'HP'
-    '0017A4' = 'HP'; '001871' = 'HP'; '0018FE' = 'HP'; '0019BB' = 'HP'; '001A4B' = 'HP'; '001B78' = 'HP'
-    '001CC4' = 'HP'; '001E0B' = 'HP'; '001F29' = 'HP'; '00215A' = 'HP'; '002264' = 'HP'; '00237D' = 'HP'
-    '002481' = 'HP'; '0025B3' = 'HP'; '002655' = 'HP'; '082E5F' = 'HP'; '101F74' = 'HP'; '10604B' = 'HP'
-    '1458D0' = 'HP'; '18A958' = 'HP'; '288023' = 'HP'; '2C4138' = 'HP'; '308D99' = 'HP'; '3464A9' = 'HP'
-    '3C5282' = 'HP'; '40B034' = 'HP'; '480FCF' = 'HP'; '645106' = 'HP'; '705A0F' = 'HP'; '843497' = 'HP'
-    '9457A5' = 'HP'; '9C8E99' = 'HP'; 'A0D3C1' = 'HP'; 'AC162D' = 'HP'; 'B05ADA' = 'HP'; 'BCEAFA' = 'HP'
-    'C8D3FF' = 'HP'; 'D48564' = 'HP'; 'E4115B' = 'HP'; 'F80DAC' = 'HP'
-
-    # Canon, Brother, Epson, Ricoh, Xerox, Kyocera
-    '000085' = 'Canon'; '001E8F' = 'Canon'; '0021E1' = 'Canon'; '180CAC' = 'Canon'; '381A52' = 'Canon'
-    '84BA20' = 'Canon'; 'A4EE57' = 'Canon'; 'B4148F' = 'Canon'; 'D46AA8' = 'Canon'
-    '001BA9' = 'Brother'; '008077' = 'Brother'; '30055C' = 'Brother'; '446D57' = 'Brother'; '541379' = 'Brother'; '8056F2' = 'Brother'; 'B499BA' = 'Brother'; 'C47EAB' = 'Brother'
-    '000048' = 'Epson'; '002164' = 'Epson'; '0026AB' = 'Epson'; '44D244' = 'Epson'; '64EB8C' = 'Epson'; 'AC140F' = 'Epson'; 'D84732' = 'Epson'
-    '000074' = 'Ricoh'; '002673' = 'Ricoh'; '000000' = 'Xerox'; '0000AA' = 'Xerox'; '0000F8' = 'Digital/Xerox'
-
-    # Dell, Lenovo, Intel, Realtek
-    '00065B' = 'Dell'; '000874' = 'Dell'; '000BDB' = 'Dell'; '000F1F' = 'Dell'; '001143' = 'Dell'; '00123F' = 'Dell'
-    '001372' = 'Dell'; '001422' = 'Dell'; '0015C5' = 'Dell'; '0016F0' = 'Dell'; '00188B' = 'Dell'; '0019B9' = 'Dell'
-    '001AA0' = 'Dell'; '001C23' = 'Dell'; '001D09' = 'Dell'; '001E4F' = 'Dell'; '002170' = 'Dell'; '002219' = 'Dell'
-    '0023AE' = 'Dell'; '0024E8' = 'Dell'; '002564' = 'Dell'; '0026B9' = 'Dell'; '180373' = 'Dell'; '1866DA' = 'Dell'
-    '20040F' = 'Dell'; '2453ED' = 'Dell'; '24B6FD' = 'Dell'; '3417EB' = 'Dell'; '44A842' = 'Dell'; '544810' = 'Dell'; '74867A' = 'Dell'
-    '847BEB' = 'Dell'; '90B11C' = 'Dell'; 'A4BADB' = 'Dell'; 'B8AC6F' = 'Dell'; 'BC305B' = 'Dell'; 'D494A9' = 'Dell'
-    'D4BED9' = 'Dell'; 'E4F004' = 'Dell'; 'F01FAF' = 'Dell'; 'F8BC12' = 'Dell'
-    '0012FE' = 'Lenovo'; '005907' = 'Lenovo'; '04CF4B' = 'Lenovo'; '083E8E' = 'Lenovo'; '085DDD' = 'Lenovo'; '207693' = 'Lenovo'
-    '28D244' = 'Lenovo'; '3052CB' = 'Lenovo'; '38BAF8' = 'Lenovo'; '4439C4' = 'Lenovo'; '54EE75' = 'Lenovo'; '6099D1' = 'Lenovo'
-    '70720D' = 'Lenovo'; '80006E' = 'Lenovo'; '88708C' = 'Lenovo'; '940853' = 'Lenovo'; '98FA9B' = 'Lenovo'; 'A0C589' = 'Lenovo'
-    'A48CDB' = 'Lenovo'; 'B49691' = 'Lenovo'; 'CC4463' = 'Lenovo'; 'E0D55E' = 'Lenovo'; 'EC70F3' = 'Lenovo'; 'F0761C' = 'Lenovo'
-    '0002B3' = 'Intel'; '000347' = 'Intel'; '000423' = 'Intel'; '000E0C' = 'Intel'; '001302' = 'Intel'; '0013E8' = 'Intel'
-    '001500' = 'Intel'; '001676' = 'Intel'; '0019D1' = 'Intel'; '001B21' = 'Intel'; '001CC0' = 'Intel'; '001DE0' = 'Intel'
-    '001E67' = 'Intel'; '001F3B' = 'Intel'; '00215C' = 'Intel'; '0022FA' = 'Intel'; '002314' = 'Intel'; '0024D7' = 'Intel'
-    '00270E' = 'Intel'; '3413E8' = 'Intel'; '3CFDFE' = 'Intel'; '4851B7' = 'Intel'; '4C79BA' = 'Intel'; '6805CA' = 'Intel'
-    '7C5758' = 'Intel'; '84A93E' = 'Intel'; '88AEDD' = 'Intel'; '8C705A' = 'Intel'; '94659C' = 'Intel'; 'A036BC' = 'Intel'
-    'A44CC8' = 'Intel'; 'ACFDCE' = 'Intel'; 'C85B76' = 'Intel'; 'D0ABD5' = 'Intel'; 'E4A471' = 'Intel'; 'E82AEA' = 'Intel'
-    'ECF4BB' = 'Intel'; 'F8633F' = 'Intel'
-    '000732' = 'Realtek'; '000E2E' = 'Realtek'; '001AEF' = 'Realtek'; '00265A' = 'Realtek'; '00E04C' = 'Realtek'
-    '5404A6' = 'Realtek'; '7085C2' = 'Realtek'; '9C5322' = 'Realtek'; 'B8AEED' = 'Realtek'; 'D85ED3' = 'Realtek'; 'FC3497' = 'Realtek'
-
-    # Microsoft / Xbox / Surface
-    '0003FF' = 'Microsoft'; '000D3A' = 'Microsoft'; '00125A' = 'Microsoft'; '00155D' = 'Microsoft (Hyper-V)'; '0017FA' = 'Microsoft'
-    '001DD8' = 'Microsoft'; '002248' = 'Microsoft'; '0025AE' = 'Microsoft'; '0050F2' = 'Microsoft'; '28167F' = 'Microsoft'
-    '281878' = 'Microsoft'; '3059B7' = 'Microsoft'; '485073' = 'Microsoft'; '501AC5' = 'Microsoft'; '5882A8' = 'Microsoft'
-    '6045BD' = 'Microsoft'; '706655' = 'Microsoft'; '7C1E52' = 'Microsoft'; '985FD3' = 'Microsoft'; 'A085FC' = 'Microsoft'
-    'B4AE2B' = 'Microsoft'; 'C49DED' = 'Microsoft'; 'DC9840' = 'Microsoft'; 'E0D4E8' = 'Microsoft'; 'F43909' = 'Microsoft'
-
-    # Sony / PlayStation & Nintendo & LG
-    '00014A' = 'Sony'; '00041F' = 'Sony'; '000AD9' = 'Sony'; '000E07' = 'Sony'; '0013A9' = 'Sony'; '0015C1' = 'Sony'
-    '0019C5' = 'Sony'; '001DBA' = 'Sony'; '00248D' = 'Sony'; '0498F3' = 'Sony'; '280DFC' = 'Sony'; '300ED5' = 'Sony'
-    '709E29' = 'Sony'; '78C881' = 'Sony'; 'A8E3EE' = 'Sony'; 'BC60A7' = 'Sony'; 'CC9EA2' = 'Sony'; 'F8461C' = 'Sony'
-    '0009BF' = 'Nintendo'; '001656' = 'Nintendo'; '0017AB' = 'Nintendo'; '00191D' = 'Nintendo'; '001B7A' = 'Nintendo'
-    '001E35' = 'Nintendo'; '001F32' = 'Nintendo'; '002147' = 'Nintendo'; '00224C' = 'Nintendo'; '0022AA' = 'Nintendo'
-    '002331' = 'Nintendo'; '0023CC' = 'Nintendo'; '00241E' = 'Nintendo'; '002444' = 'Nintendo'; '0025A0' = 'Nintendo'
-    '002659' = 'Nintendo'; '78A2A0' = 'Nintendo'; '98B6E9' = 'Nintendo'; 'B87826' = 'Nintendo'; 'D86BF7' = 'Nintendo'; 'E84E06' = 'Nintendo'
-    '0019A1' = 'LG'; '001C62' = 'LG'; '001E75' = 'LG'; '0022A9' = 'LG'; '002483' = 'LG'; '10F96F' = 'LG'
-    '14C913' = 'LG'; '203D66' = 'LG'; '34FCEF' = 'LG'; '58A2B5' = 'LG'; '64995D' = 'LG'; '785DC7' = 'LG'
-    '88366C' = 'LG'; 'A823FE' = 'LG'; 'B81DAA' = 'LG'; 'CC2D83' = 'LG'; 'E85B5B' = 'LG'; 'F80CF3' = 'LG'
-
-    # Virtualization (VMware, VirtualBox, QEMU, Proxmox)
-    '000569' = 'VMware'; '000C29' = 'VMware'; '001C14' = 'VMware'; '005056' = 'VMware'
-    '080027' = 'Oracle VirtualBox'; '525400' = 'QEMU / KVM / Proxmox VM'
+    $script:MacOuiDatabase = $db
+    return $script:MacOuiDatabase
 }
 
 function Resolve-MacVendor {
@@ -892,9 +830,10 @@ function Resolve-MacVendor {
     $firstByte = [Convert]::ToByte($cleanMac.Substring(0,2), 16)
     $isPrivate = ($firstByte -band 0x02) -ne 0
 
+    $ouiDb = Get-MacOuiDatabase
     $prefix = $cleanMac.Substring(0, 6)
-    if ($script:MacOuiDatabase.ContainsKey($prefix)) {
-        $vendor = $script:MacOuiDatabase[$prefix]
+    if ($ouiDb.ContainsKey($prefix)) {
+        $vendor = $ouiDb[$prefix]
         if ($isPrivate) { return "$vendor (Private MAC)" }
         return $vendor
     }
@@ -910,7 +849,7 @@ function Resolve-MacVendor {
             $wc.Headers.Add("User-Agent", "NetworkScanner/1.0")
             $resp = $wc.DownloadString($apiUrl) | ConvertFrom-Json
             if ($resp.success -and $resp.found -and $resp.company) {
-                $script:MacOuiDatabase[$prefix] = $resp.company
+                $ouiDb[$prefix] = $resp.company
                 return $resp.company
             }
         } catch { }
@@ -1513,10 +1452,342 @@ function Get-ActiveNetworkConfig {
 }
 
 # ====================================================================
+# 4c. WI-FI & WIRELESS ENVIRONMENT DISCOVERY
+# ====================================================================
+function Get-ConnectedWifiInfo {
+    try {
+        $raw = & netsh.exe wlan show interfaces 2>$null
+        if (-not $raw) { return $null }
+
+        $info = [ordered]@{}
+        foreach ($line in $raw) {
+            if ($line -match '^\s*([^:]+?)\s*:\s*(.*)$') {
+                $key = $Matches[1].Trim()
+                $val = $Matches[2].Trim()
+                $info[$key] = $val
+            }
+        }
+
+        if (-not $info.Contains('State') -or $info['State'] -ne 'connected') {
+            return [PSCustomObject]@{
+                IsConnected      = $false
+                Name             = if ($info['Name']) { $info['Name'] } else { 'Wi-Fi' }
+                Description      = if ($info['Description']) { $info['Description'] } else { 'Wireless Adapter' }
+                State            = if ($info['State']) { $info['State'] } else { 'Disconnected / No WLAN' }
+                SSID             = ""
+                BSSID            = ""
+                Vendor           = ""
+                Band             = ""
+                Channel          = ""
+                RadioType        = ""
+                Authentication   = ""
+                Cipher           = ""
+                ReceiveRateMbps  = ""
+                TransmitRateMbps = ""
+                SignalPercent    = 0
+                Rssi             = ""
+                Profile          = ""
+            }
+        }
+
+        $bssid = if ($info['AP BSSID']) { $info['AP BSSID'] } elseif ($info['BSSID']) { $info['BSSID'] } else { "" }
+        $vendor = if ($bssid) { Resolve-MacVendor -MacAddress $bssid } else { "Unknown" }
+
+        $sigInt = 0
+        if ($info['Signal'] -match '(\d+)') { $sigInt = [int]$Matches[1] }
+
+        return [PSCustomObject]@{
+            IsConnected      = $true
+            Name             = if ($info['Name']) { $info['Name'] } else { 'Wi-Fi' }
+            Description      = if ($info['Description']) { $info['Description'] } else { 'Wireless Adapter' }
+            State            = $info['State']
+            SSID             = if ($info['SSID']) { $info['SSID'] } else { "" }
+            BSSID            = $bssid
+            Vendor           = $vendor
+            Band             = if ($info['Band']) { $info['Band'] } else { "" }
+            Channel          = if ($info['Channel']) { $info['Channel'] } else { "" }
+            RadioType        = if ($info['Radio type']) { $info['Radio type'] } else { "" }
+            Authentication   = if ($info['Authentication']) { $info['Authentication'] } else { "" }
+            Cipher           = if ($info['Cipher']) { $info['Cipher'] } else { "" }
+            ReceiveRateMbps  = if ($info['Receive rate (Mbps)']) { $info['Receive rate (Mbps)'] } else { "" }
+            TransmitRateMbps = if ($info['Transmit rate (Mbps)']) { $info['Transmit rate (Mbps)'] } else { "" }
+            SignalPercent    = $sigInt
+            Rssi             = if ($info['Rssi']) { $info['Rssi'] } else { "" }
+            Profile          = if ($info['Profile']) { $info['Profile'] } else { "" }
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-NearbyWifiNetworks {
+    param(
+        [string]$ConnectedBssid = "",
+        [switch]$DoOnlineLookup,
+        [switch]$ForceScan = $true,
+        [int]$ScanWaitMs = 3000
+    )
+
+    try {
+        # Helper to parse netsh output
+        $parseNetsh = {
+            $raw = & netsh.exe wlan show networks mode=bssid 2>$null
+            if (-not $raw) { return @() }
+
+            $nets = [System.Collections.Generic.List[PSCustomObject]]::new()
+            $curSsid = $null
+            $curNetType = ""
+            $curAuth = ""
+            $curEnc = ""
+            $curBssidObj = $null
+
+            foreach ($line in $raw) {
+                $trimmed = $line.Trim()
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+                if ($trimmed -match '^SSID\s+\d+\s*:\s*(.*)$') {
+                    if ($curBssidObj) {
+                        $nets.Add([PSCustomObject]$curBssidObj)
+                        $curBssidObj = $null
+                    }
+                    $ssidName = $Matches[1].Trim()
+                    $curSsid = if ($ssidName) { $ssidName } else { "[Hidden SSID]" }
+                    $curNetType = ""
+                    $curAuth = ""
+                    $curEnc = ""
+                    continue
+                }
+
+                if ($trimmed -match '^Network type\s*:\s*(.*)$') {
+                    $curNetType = $Matches[1].Trim()
+                    continue
+                }
+                if ($trimmed -match '^Authentication\s*:\s*(.*)$') {
+                    $curAuth = $Matches[1].Trim()
+                    continue
+                }
+                if ($trimmed -match '^Encryption\s*:\s*(.*)$') {
+                    $curEnc = $Matches[1].Trim()
+                    continue
+                }
+
+                if ($trimmed -match '^BSSID\s+\d+\s*:\s*([0-9a-fA-F:-]{17})') {
+                    if ($curBssidObj) {
+                        $nets.Add([PSCustomObject]$curBssidObj)
+                    }
+                    $bssidMac = $Matches[1].Trim()
+                    $isConn = ($ConnectedBssid -and ($bssidMac.ToLower() -eq $ConnectedBssid.ToLower()))
+                    $vendor = Resolve-MacVendor -MacAddress $bssidMac -QueryOnline:$DoOnlineLookup
+
+                    $curBssidObj = [ordered]@{
+                        Status         = if ($isConn) { "CONNECTED" } else { "NEARBY" }
+                        SSID           = $curSsid
+                        BSSID          = $bssidMac
+                        Vendor         = $vendor
+                        NetworkType    = $curNetType
+                        Authentication = $curAuth
+                        Encryption     = $curEnc
+                        SignalPercent  = 0
+                        SignalBars     = "[....]   0%"
+                        RadioType      = ""
+                        Band           = ""
+                        Channel        = ""
+                        IsConnected    = $isConn
+                    }
+                    continue
+                }
+
+                if ($curBssidObj) {
+                    if ($trimmed -match '^Signal\s*:\s*(\d+)%') {
+                        $sigVal = [int]$Matches[1]
+                        $curBssidObj['SignalPercent'] = $sigVal
+                        $bars = if ($sigVal -ge 80) { "[####]" }
+                                elseif ($sigVal -ge 60) { "[###.]" }
+                                elseif ($sigVal -ge 40) { "[##..]" }
+                                elseif ($sigVal -ge 20) { "[#...]" }
+                                elseif ($sigVal -gt 0)  { "[#...]" }
+                                else { "[....]" }
+                        $curBssidObj['SignalBars'] = "$bars $('{0,3}' -f $sigVal)%"
+                    } elseif ($trimmed -match '^Radio type\s*:\s*(.*)$') {
+                        $curBssidObj['RadioType'] = $Matches[1].Trim()
+                    } elseif ($trimmed -match '^Band\s*:\s*(.*)$') {
+                        $curBssidObj['Band'] = $Matches[1].Trim()
+                    } elseif ($trimmed -match '^Channel\s*:\s*(\d+)') {
+                        $curBssidObj['Channel'] = $Matches[1].Trim()
+                    }
+                }
+            }
+
+            if ($curBssidObj) {
+                $nets.Add([PSCustomObject]$curBssidObj)
+            }
+            return $nets
+        }
+
+        # Actively trigger 802.11 channel sweep across all Wi-Fi cards if requested
+        if ($ForceScan) {
+            try {
+                [FastNetScanner.Core]::TriggerWlanScan($ScanWaitMs) | Out-Null
+            } catch { }
+        }
+
+        $results = & $parseNetsh
+
+        # If only 0 or 1 AP is found, force an active 3-second hardware sweep and re-query
+        if ($results.Count -le 1) {
+            try {
+                [FastNetScanner.Core]::TriggerWlanScan(3000) | Out-Null
+                $results = & $parseNetsh
+            } catch { }
+        }
+
+        # Sort: Connected AP first, then signal strength descending
+        $sortedNets = @($results | Sort-Object @{ Expression = { if ($_.IsConnected) { 0 } else { 1 } } },
+                                               @{ Expression = { -$_.SignalPercent } })
+
+        return ,$sortedNets
+    } catch {
+        return @()
+    }
+}
+
+function Export-WifiSurvey {
+    param(
+        $Networks,
+        $ConnectedWifi,
+        [string]$ReportFolder = "Reports"
+    )
+
+    if (-not $Networks -or $Networks.Count -eq 0) {
+        Write-Host " [!] No Wi-Fi networks available to export." -ForegroundColor Yellow
+        return
+    }
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+    $baseDir = if ([System.IO.Path]::IsPathRooted($ReportFolder)) { $ReportFolder } else { Join-Path (Get-Location).Path $ReportFolder }
+    $surveyFolder = Join-Path $baseDir "WifiSurvey_$timestamp"
+
+    if (-not (Test-Path -Path $surveyFolder)) {
+        [System.IO.Directory]::CreateDirectory($surveyFolder) | Out-Null
+    }
+
+    $csvFile = Join-Path $surveyFolder "wifi_survey.csv"
+    $jsonFile = Join-Path $surveyFolder "wifi_survey.json"
+
+    $Networks | Select-Object Status, SSID, BSSID, Vendor, SignalPercent, Channel, Band, RadioType, Authentication, Encryption, IsConnected |
+        Export-Csv -Path $csvFile -NoTypeInformation -Encoding utf8
+
+    $surveySummaryObj = [PSCustomObject]@{
+        ScanTimestamp  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        ConnectedWifi  = if ($ConnectedWifi) { $ConnectedWifi } else { $null }
+        DiscoveredAPs  = $Networks.Count
+        Networks       = $Networks
+    }
+    $surveySummaryObj | ConvertTo-Json -Depth 4 | Out-File -FilePath $jsonFile -Encoding utf8
+
+    Write-Host ""
+    Write-Host " [+] Wi-Fi Survey successfully exported to: $surveyFolder" -ForegroundColor Green
+    Write-Host "    |-- wifi_survey.csv  (CSV Spreadsheet)" -ForegroundColor DarkCyan
+    Write-Host "    |-- wifi_survey.json (JSON Structured Dataset)" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Show-WifiSurvey {
+    param(
+        [switch]$DoOnlineLookup,
+        [string]$BaseReportFolder = "Reports"
+    )
+
+    $loopSurvey = $true
+    while ($loopSurvey) {
+        $connWifi = Get-ConnectedWifiInfo
+        $connBssid = if ($connWifi -and $connWifi.IsConnected) { $connWifi.BSSID } else { "" }
+
+        Write-Host ""
+        Write-Host "=========================================================================================================" -ForegroundColor Cyan
+        Write-Host " [SCRY] WI-FI ENVIRONMENT & NEARBY ACCESS POINTS SURVEY" -ForegroundColor Cyan
+        Write-Host "=========================================================================================================" -ForegroundColor Cyan
+
+        if ($connWifi -and $connWifi.IsConnected) {
+            Write-Host " Connected Network : " -NoNewline; Write-Host "$($connWifi.SSID)" -ForegroundColor Green -NoNewline
+            Write-Host " (BSSID: $($connWifi.BSSID) - $($connWifi.Vendor))" -ForegroundColor DarkCyan
+            Write-Host " Radio & Channel   : " -NoNewline; Write-Host "$($connWifi.RadioType) | Band: $($connWifi.Band) | Channel: $($connWifi.Channel)" -ForegroundColor Yellow
+            $linkSpeedStr = if ($connWifi.ReceiveRateMbps -and $connWifi.TransmitRateMbps) { " | Link: Rx $($connWifi.ReceiveRateMbps) Mbps / Tx $($connWifi.TransmitRateMbps) Mbps" } else { "" }
+            $rssiStr = if ($connWifi.Rssi) { " ($($connWifi.Rssi) dBm)" } else { "" }
+            Write-Host " Signal & Link     : " -NoNewline; Write-Host "$($connWifi.SignalPercent)%$rssiStr$linkSpeedStr" -ForegroundColor Green
+            Write-Host " Security / Cipher : " -NoNewline; Write-Host "$($connWifi.Authentication) ($($connWifi.Cipher))" -ForegroundColor White
+            Write-Host " Interface Adapter : " -NoNewline; Write-Host "$($connWifi.Name) ($($connWifi.Description))" -ForegroundColor Gray
+            Write-Host "---------------------------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+        } elseif ($connWifi -and $connWifi.State) {
+            Write-Host " Wi-Fi Interface   : $($connWifi.Name) ($($connWifi.Description)) - Status: $($connWifi.State)" -ForegroundColor Yellow
+            Write-Host "---------------------------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+        } else {
+            Write-Host " [!] No active Wi-Fi interface detected on this machine (or WLAN AutoConfig service is stopped)." -ForegroundColor Yellow
+            Write-Host "---------------------------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+        }
+
+        Write-Host " Sweeping wireless spectrum (2.4 GHz / 5 GHz / 6 GHz) for nearby access points..." -ForegroundColor Gray
+        $nearby = Get-NearbyWifiNetworks -ConnectedBssid $connBssid -DoOnlineLookup:$DoOnlineLookup -ForceScan
+
+        if (-not $nearby -or $nearby.Count -eq 0) {
+            Write-Host " [-] No nearby wireless networks detected or Wi-Fi adapter is disabled." -ForegroundColor Yellow
+            Write-Host "=========================================================================================================" -ForegroundColor Cyan
+            return @()
+        }
+
+        Write-Host ""
+        Write-Host (" {0,-3} {1,-24} {2,-18} {3,-12} {4,-12} {5,-10} {6,-17} {7}" -f "#", "SSID NAME", "BSSID (AP MAC)", "SIGNAL", "CHAN (BAND)", "RADIO", "SECURITY", "AP VENDOR") -ForegroundColor Cyan
+        Write-Host "---------------------------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+
+        $count = 1
+        foreach ($net in $nearby) {
+            $statusTag = if ($net.IsConnected) { "*" } else { " " }
+            $ssidDisp = if ($net.SSID.Length -gt 22) { $net.SSID.Substring(0, 21) + "…" } else { $net.SSID }
+            $vendorDisp = if ($net.Vendor.Length -gt 20) { $net.Vendor.Substring(0, 19) + "…" } else { $net.Vendor }
+            $chanBand = if ($net.Band -match '5') { "$($net.Channel) (5G)" } elseif ($net.Band -match '6') { "$($net.Channel) (6G)" } elseif ($net.Band) { "$($net.Channel) (2.4G)" } else { "$($net.Channel)" }
+            $secDisp = if ($net.Authentication.Length -gt 15) { $net.Authentication.Substring(0, 14) + "…" } else { $net.Authentication }
+
+            Write-Host ("{0,2}{1,-1} " -f $count, $statusTag) -ForegroundColor $(if ($net.IsConnected) { "Green" } else { "DarkGray" }) -NoNewline
+            Write-Host ("{0,-24} " -f $ssidDisp) -ForegroundColor $(if ($net.IsConnected) { "Green" } else { "Yellow" }) -NoNewline
+            Write-Host ("{0,-18} " -f $net.BSSID) -ForegroundColor Gray -NoNewline
+            
+            $sigColor = if ($net.SignalPercent -ge 70) { "Green" } elseif ($net.SignalPercent -ge 40) { "Yellow" } else { "Red" }
+            Write-Host ("{0,-12} " -f $net.SignalBars) -ForegroundColor $sigColor -NoNewline
+            Write-Host ("{0,-12} " -f $chanBand) -ForegroundColor Cyan -NoNewline
+            Write-Host ("{0,-10} " -f $net.RadioType) -ForegroundColor Gray -NoNewline
+            Write-Host ("{0,-17} " -f $secDisp) -ForegroundColor DarkCyan -NoNewline
+            Write-Host ("{0}" -f $vendorDisp) -ForegroundColor White
+
+            $count++
+        }
+
+        Write-Host "=========================================================================================================" -ForegroundColor Cyan
+        Write-Host " Found $($nearby.Count) visible access point(s). [*] indicates currently connected network." -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Options: [R] Rescan / Refresh | [E] Export Survey (CSV/JSON) | [M] Return to Menu" -ForegroundColor DarkCyan
+        Write-Host -NoNewline "Choice [M]: "
+        $subChoice = Read-Host
+
+        if ($subChoice -match '^[eE]') {
+            Export-WifiSurvey -Networks $nearby -ConnectedWifi $connWifi -ReportFolder $BaseReportFolder
+            Write-Host " Press ENTER to return to Wi-Fi view..." -ForegroundColor Gray
+            $null = Read-Host
+        } elseif ($subChoice -match '^[rR]') {
+            # Loop again to rescan
+            continue
+        } else {
+            $loopSurvey = $false
+        }
+    }
+
+    return $nearby
+}
+
+# ====================================================================
 # 5. HTML REPORT GENERATOR
 # ====================================================================
 function Generate-HtmlReport {
-    param($Devices, $NetworkConfig, [string]$FilePath, [double]$ScanDurationSec, $WanInfo = $null)
+    param($Devices, $NetworkConfig, [string]$FilePath, [double]$ScanDurationSec, $WanInfo = $null, $WifiInfo = $null, $NearbyWifi = @())
 
     $fullReportPath = if ($FilePath) {
         try { [System.IO.Path]::GetFullPath($FilePath) } catch { $FilePath }
@@ -1574,7 +1845,43 @@ function Generate-HtmlReport {
     $iotCount = @($Devices | Where-Object { $_.DeviceType -match 'IoT|Smart Home' }).Count
     $storageCount = @($Devices | Where-Object { $_.DeviceType -match 'Storage|NAS' }).Count
 
-    # Build Split Network Context Cards (LOCAL and ONLINE / OFFLINE)
+    # Build Network Context Cards (Local Subnet, Wi-Fi Environment, External WAN)
+    $wifiCardHtml = ""
+    if ($WifiInfo -and $WifiInfo.IsConnected) {
+        $wifiBandCh = if ($WifiInfo.Band -and $WifiInfo.Channel) { "$($WifiInfo.Band) &bull; Ch $($WifiInfo.Channel)" } elseif ($WifiInfo.Band) { $WifiInfo.Band } else { "" }
+        $wifiSec = if ($WifiInfo.Authentication) { [System.Net.WebUtility]::HtmlEncode($WifiInfo.Authentication) } else { "Open" }
+        $wifiVen = if ($WifiInfo.Vendor) { [System.Net.WebUtility]::HtmlEncode($WifiInfo.Vendor) } else { "Unknown" }
+        $wifiSpeed = if ($WifiInfo.ReceiveRateMbps -and $WifiInfo.TransmitRateMbps) { " &bull; Rx $($WifiInfo.ReceiveRateMbps) / Tx $($WifiInfo.TransmitRateMbps) Mbps" } else { "" }
+
+        $wifiCardHtml = @"
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-heading">Wi-Fi Environment</span>
+                    <span class="badge badge-wifi">Connected</span>
+                </div>
+                <table class="kv-table">
+                    <tr><td class="kv-key">SSID / Band</td><td class="kv-val mono font-bold">$([System.Net.WebUtility]::HtmlEncode($WifiInfo.SSID)) <span class="text-muted">($wifiBandCh)</span></td></tr>
+                    <tr><td class="kv-key">AP BSSID / Vendor</td><td class="kv-val mono">$($WifiInfo.BSSID) <span class="text-muted">($wifiVen)</span></td></tr>
+                    <tr><td class="kv-key">Signal &amp; Link</td><td class="kv-val mono" style="color: var(--success-fg); font-weight: 600;">$($WifiInfo.SignalPercent)% <span class="text-muted" style="font-weight: 400; color: var(--text-secondary);">($($WifiInfo.RadioType)$wifiSpeed)</span></td></tr>
+                </table>
+            </div>
+"@
+    } elseif ($WifiInfo -and $WifiInfo.State -and $WifiInfo.State -ne 'Disconnected / No WLAN') {
+        $wifiCardHtml = @"
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-heading">Wi-Fi Environment</span>
+                    <span class="badge badge-active">$([System.Net.WebUtility]::HtmlEncode($WifiInfo.State))</span>
+                </div>
+                <table class="kv-table">
+                    <tr><td class="kv-key">Adapter</td><td class="kv-val">$([System.Net.WebUtility]::HtmlEncode($WifiInfo.Name))</td></tr>
+                    <tr><td class="kv-key">Description</td><td class="kv-val text-muted">$([System.Net.WebUtility]::HtmlEncode($WifiInfo.Description))</td></tr>
+                    <tr><td class="kv-key">Nearby APs</td><td class="kv-val">$(@($NearbyWifi).Count) visible access points</td></tr>
+                </table>
+            </div>
+"@
+    }
+
     $wanCardHtml = ""
     if ($WanInfo -and $WanInfo.IsConnected) {
         $locParts = @()
@@ -1587,19 +1894,6 @@ function Generate-HtmlReport {
         $asnBrief = if ($WanInfo.ASN) { [System.Net.WebUtility]::HtmlEncode($WanInfo.ASN) } else { "-" }
 
         $wanCardHtml = @"
-        <div class="context-grid">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-heading">Local Network</span>
-                    <span class="badge badge-local">Local</span>
-                </div>
-                <table class="kv-table">
-                    <tr><td class="kv-key">Subnet CIDR</td><td class="kv-val mono">$($NetworkConfig.SubnetCidr)</td></tr>
-                    <tr><td class="kv-key">Router Gateway</td><td class="kv-val mono">$($NetworkConfig.GatewayIP)</td></tr>
-                    <tr><td class="kv-key">Scanner Host</td><td class="kv-val mono">$($NetworkConfig.LocalIP) <span class="text-muted">($($NetworkConfig.InterfaceAlias))</span></td></tr>
-                </table>
-            </div>
-
             <div class="card">
                 <div class="card-header">
                     <span class="card-heading">External Uplink</span>
@@ -1611,23 +1905,9 @@ function Generate-HtmlReport {
                     <tr><td class="kv-key">Hostname &amp; ASN</td><td class="kv-val mono" style="font-size: 11.5px; color: var(--text-secondary);">$hostBrief <span class="text-muted">($asnBrief)</span></td></tr>
                 </table>
             </div>
-        </div>
 "@
     } elseif ($WanInfo) {
         $wanCardHtml = @"
-        <div class="context-grid">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-heading">Local Network</span>
-                    <span class="badge badge-local">Local</span>
-                </div>
-                <table class="kv-table">
-                    <tr><td class="kv-key">Subnet CIDR</td><td class="kv-val mono">$($NetworkConfig.SubnetCidr)</td></tr>
-                    <tr><td class="kv-key">Router Gateway</td><td class="kv-val mono">$($NetworkConfig.GatewayIP)</td></tr>
-                    <tr><td class="kv-key">Scanner Host</td><td class="kv-val mono">$($NetworkConfig.LocalIP) <span class="text-muted">($($NetworkConfig.InterfaceAlias))</span></td></tr>
-                </table>
-            </div>
-
             <div class="card">
                 <div class="card-header">
                     <span class="card-heading">External Uplink</span>
@@ -1639,6 +1919,74 @@ function Generate-HtmlReport {
                     <tr><td class="kv-key">Environment</td><td class="kv-val text-muted">Isolated / Air-Gapped Network</td></tr>
                 </table>
             </div>
+"@
+    }
+
+    # Build Wi-Fi Nearby Access Points Table HTML
+    $wifiSectionHtml = ""
+    if ($NearbyWifi -and @($NearbyWifi).Count -gt 0) {
+        $wifiRowsHtml = New-Object System.Text.StringBuilder
+        foreach ($w in $NearbyWifi) {
+            $wBadgeClass = if ($w.IsConnected) { "badge-gateway" } else { "badge-active" }
+            $wBadgeText  = if ($w.IsConnected) { "Connected" } else { "Nearby" }
+
+            $sigColor = if ($w.SignalPercent -ge 70) { "var(--success-fg)" }
+                        elseif ($w.SignalPercent -ge 40) { "var(--warning-fg)" }
+                        else { "#f85149" }
+
+            $chanDisp = if ($w.Band -match '5') { "$($w.Channel) <span class='text-muted'>(5 GHz)</span>" }
+                        elseif ($w.Band -match '6') { "$($w.Channel) <span class='text-muted'>(6 GHz)</span>" }
+                        elseif ($w.Band) { "$($w.Channel) <span class='text-muted'>(2.4 GHz)</span>" }
+                        else { "$($w.Channel)" }
+
+            $encDisp = if ($w.Encryption) { "<span class='text-muted'>($($w.Encryption))</span>" } else { "" }
+
+            $wRow = @"
+            <tr>
+                <td><span class='badge $wBadgeClass'>$wBadgeText</span></td>
+                <td class='type-cell'><strong>$([System.Net.WebUtility]::HtmlEncode($w.SSID))</strong></td>
+                <td class='mac-cell'>$($w.BSSID)</td>
+                <td class='vendor-cell'>$([System.Net.WebUtility]::HtmlEncode($w.Vendor))</td>
+                <td>
+                    <div style='display: flex; align-items: center; gap: 8px;'>
+                        <div class='sig-track'><div class='sig-fill' style='width: $($w.SignalPercent)%; background: $sigColor;'></div></div>
+                        <span class='mono' style='font-size: 11.5px; font-weight: 600;'>$($w.SignalPercent)%</span>
+                    </div>
+                </td>
+                <td class='latency-cell'>$chanDisp</td>
+                <td><span class='port-chip'>$([System.Net.WebUtility]::HtmlEncode($w.RadioType))</span></td>
+                <td>$([System.Net.WebUtility]::HtmlEncode($w.Authentication)) $encDisp</td>
+            </tr>
+"@
+            [void]$wifiRowsHtml.AppendLine($wRow)
+        }
+
+        $wifiSectionHtml = @"
+        <div style="margin-top: 28px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <div style="font-size: 15px; font-weight: 600; color: var(--text-primary);">Nearby Wi-Fi Networks &amp; Access Points</div>
+                <div style="font-size: 12px; color: var(--text-secondary);">Wireless environment survey &bull; $(@($NearbyWifi).Count) access point(s) detected</div>
+            </div>
+            <button class="btn" onclick="exportWifiTableToCSV('scry_wifi_survey.csv')">Export Wi-Fi CSV</button>
+        </div>
+        <div class="table-wrap" style="margin-bottom: 20px;">
+            <table id="wifiTable">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>SSID</th>
+                        <th>BSSID (AP MAC)</th>
+                        <th>Hardware Vendor</th>
+                        <th>Signal</th>
+                        <th>Channel / Band</th>
+                        <th>Radio Type</th>
+                        <th>Security</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    $($wifiRowsHtml.ToString())
+                </tbody>
+            </table>
         </div>
 "@
     }
@@ -1670,6 +2018,9 @@ function Generate-HtmlReport {
             --info-fg: #58a6ff;
             --info-bg: rgba(56, 139, 253, 0.15);
             --info-border: rgba(56, 139, 253, 0.4);
+            --wifi-fg: #a371f7;
+            --wifi-bg: rgba(163, 113, 247, 0.15);
+            --wifi-border: rgba(163, 113, 247, 0.4);
             --row-hover: #1c2128;
             --mono-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             --sans-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
@@ -1693,8 +2044,8 @@ function Generate-HtmlReport {
         .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; }
         .stat-number { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-top: 2px; font-family: var(--mono-font); }
         
-        /* Dual Context Cards */
-        .context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-bottom: 20px; }
+        /* Context Grid */
+        .context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-bottom: 20px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
         .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); }
         .card-heading { font-size: 13px; font-weight: 600; color: var(--text-primary); }
@@ -1703,6 +2054,7 @@ function Generate-HtmlReport {
         .kv-key { color: var(--text-muted); width: 130px; }
         .kv-val { color: var(--text-primary); font-weight: 500; word-break: break-all; }
         .kv-val.mono { font-family: var(--mono-font); }
+        .font-bold { font-weight: 600; }
         
         /* Badges & Chips */
         .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 12px; font-size: 11px; font-weight: 600; line-height: 1.2; text-transform: uppercase; letter-spacing: 0.03em; }
@@ -1710,8 +2062,11 @@ function Generate-HtmlReport {
         .badge-local { background: var(--info-bg); color: var(--info-fg); border: 1px solid var(--info-border); }
         .badge-active { background: var(--surface-subtle); color: var(--text-secondary); border: 1px solid var(--border); }
         .badge-offline { background: var(--warning-bg); color: var(--warning-fg); border: 1px solid var(--warning-border); }
+        .badge-wifi { background: var(--wifi-bg); color: var(--wifi-fg); border: 1px solid var(--wifi-border); }
         
         .port-chip { display: inline-block; background: var(--surface-subtle); border: 1px solid var(--border); color: var(--text-secondary); padding: 1px 6px; border-radius: 3px; font-family: var(--mono-font); font-size: 11px; margin: 1px 2px 1px 0; }
+        .sig-track { width: 56px; height: 6px; background: var(--surface-subtle); border-radius: 3px; overflow: hidden; border: 1px solid var(--border); }
+        .sig-fill { height: 100%; border-radius: 2px; }
 
         /* Toolbar */
         .toolbar { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -1764,7 +2119,22 @@ function Generate-HtmlReport {
             <div class="stat-item"><div class="stat-label">IoT / Smart</div><div class="stat-number">$iotCount</div></div>
         </div>
 
-        $wanCardHtml
+        <div class="context-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-heading">Local Network</span>
+                    <span class="badge badge-local">Local</span>
+                </div>
+                <table class="kv-table">
+                    <tr><td class="kv-key">Subnet CIDR</td><td class="kv-val mono">$($NetworkConfig.SubnetCidr)</td></tr>
+                    <tr><td class="kv-key">Router Gateway</td><td class="kv-val mono">$($NetworkConfig.GatewayIP)</td></tr>
+                    <tr><td class="kv-key">Scanner Host</td><td class="kv-val mono">$($NetworkConfig.LocalIP) <span class="text-muted">($($NetworkConfig.InterfaceAlias))</span></td></tr>
+                </table>
+            </div>
+
+            $wifiCardHtml
+            $wanCardHtml
+        </div>
 
         <div class="toolbar">
             <input type="text" id="searchInput" class="search-input" placeholder="Filter by IP, MAC, Hostname, Vendor, or Device Type..." onkeyup="filterTable()">
@@ -1792,6 +2162,8 @@ function Generate-HtmlReport {
             </table>
         </div>
 
+        $wifiSectionHtml
+
         <footer class="page-footer">
             Generated by SCRY &bull; $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')$(if ($fullReportPath) { " &bull; <code style='font-family: var(--mono-font); font-size: 11px; color: var(--text-secondary);'>$([System.Net.WebUtility]::HtmlEncode($fullReportPath))</code>" } else { "" })
         </footer>
@@ -1812,6 +2184,26 @@ function Generate-HtmlReport {
         function exportTableToCSV(filename) {
             var csv = [];
             var rows = document.querySelectorAll("#deviceTable tr");
+            for (var i = 0; i < rows.length; i++) {
+                var row = [], cols = rows[i].querySelectorAll("td, th");
+                for (var j = 0; j < cols.length; j++) {
+                    var data = cols[j].innerText.replace(/(\r\n|\n|\r)/gm, " ").replace(/"/g, '""');
+                    row.push('"' + data + '"');
+                }
+                csv.push(row.join(","));
+            }
+            var csvFile = new Blob([csv.join("\n")], { type: "text/csv" });
+            var downloadLink = document.createElement("a");
+            downloadLink.download = filename;
+            downloadLink.href = window.URL.createObjectURL(csvFile);
+            downloadLink.style.display = "none";
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+        }
+
+        function exportWifiTableToCSV(filename) {
+            var csv = [];
+            var rows = document.querySelectorAll("#wifiTable tr");
             for (var i = 0; i < rows.length; i++) {
                 var row = [], cols = rows[i].querySelectorAll("td, th");
                 for (var j = 0; j < cols.length; j++) {
@@ -1860,7 +2252,8 @@ function Invoke-NetworkScanner {
         [switch]$BypassDhcpCheck,
         [int]$DhcpWaitSec = 12,
         [switch]$SkipWanLookup,
-        [int]$WanTimeout = 3
+        [int]$WanTimeout = 3,
+        [switch]$SkipWifiScan
     )
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1877,6 +2270,17 @@ function Invoke-NetworkScanner {
             Write-Host " [*] Checking Internet connectivity & External WAN IP..." -ForegroundColor DarkGray
         }
         $wanInfo = Get-ExternalNetworkInfo -TimeoutMs ($WanTimeout * 1000)
+    }
+
+    # Step A.2: Wi-Fi Environment Discovery
+    $wifiInfo = Get-ConnectedWifiInfo
+    $nearbyWifi = @()
+    if (-not $SkipWifiScan) {
+        if (-not $SilentMode) {
+            Write-Host " [*] Sweeping wireless spectrum (2.4 GHz / 5 GHz / 6 GHz) for nearby access points..." -ForegroundColor DarkGray
+        }
+        $connBssid = if ($wifiInfo -and $wifiInfo.IsConnected) { $wifiInfo.BSSID } else { "" }
+        $nearbyWifi = Get-NearbyWifiNetworks -ConnectedBssid $connBssid -DoOnlineLookup:$DoOnlineLookup -ForceScan:$true -ScanWaitMs 3000
     }
 
     $netConfig = $null
@@ -1916,7 +2320,12 @@ function Invoke-NetworkScanner {
         Write-Host " [SCRY]" -ForegroundColor Cyan
         Write-Host "=================================================================" -ForegroundColor Cyan
         Write-Host " Target Subnet     : " -NoNewline; Write-Host "$($netConfig.SubnetCidr)" -ForegroundColor Yellow
-        Write-Host " Active Interface  : " -NoNewline; Write-Host "$($netConfig.InterfaceAlias)" -ForegroundColor Yellow
+
+        $ifDisp = "$($netConfig.InterfaceAlias)"
+        if ($wifiInfo -and $wifiInfo.IsConnected -and ($netConfig.InterfaceAlias -match 'Wi-Fi|Wireless|WLAN' -or $wifiInfo.Name -eq $netConfig.InterfaceAlias)) {
+            $ifDisp += " (Connected: `"$($wifiInfo.SSID)`" | $($wifiInfo.SignalPercent)% Signal | $($wifiInfo.Band) Ch $($wifiInfo.Channel))"
+        }
+        Write-Host " Active Interface  : " -NoNewline; Write-Host "$ifDisp" -ForegroundColor Yellow
         Write-Host " Default Gateway   : " -NoNewline; Write-Host "$($netConfig.GatewayIP)" -ForegroundColor Yellow
         Write-Host " Local Computer IP : " -NoNewline; Write-Host "$($netConfig.LocalIP)" -ForegroundColor Yellow
         if ($wanInfo -and $wanInfo.IsConnected) {
@@ -2067,6 +2476,15 @@ function Invoke-NetworkScanner {
         Write-Host ""
     }
 
+    # Step E.1: Refresh Wi-Fi Survey right before report generation (capturing full background sweep)
+    if (-not $SkipWifiScan -and (@($nearbyWifi).Count -le 1)) {
+        $connBssid = if ($wifiInfo -and $wifiInfo.IsConnected) { $wifiInfo.BSSID } else { "" }
+        $refreshedWifi = Get-NearbyWifiNetworks -ConnectedBssid $connBssid -DoOnlineLookup:$DoOnlineLookup -ForceScan:$true -ScanWaitMs 3000
+        if ($refreshedWifi -and @($refreshedWifi).Count -gt @($nearbyWifi).Count) {
+            $nearbyWifi = $refreshedWifi
+        }
+    }
+
     # Step F: Export Files & Timestamped Report Folder
     $generatedHtmlPath = $null
 
@@ -2082,11 +2500,12 @@ function Invoke-NetworkScanner {
         $autoHtml = Join-Path $scanFolder "report.html"
         $autoCsv  = Join-Path $scanFolder "devices.csv"
         $autoJson = Join-Path $scanFolder "devices.json"
+        $autoWifiJson = Join-Path $scanFolder "wifi_survey.json"
         $autoNetJson = Join-Path $scanFolder "network_info.json"
         $autoTxt  = Join-Path $scanFolder "summary.txt"
 
         # 1. HTML Report
-        Generate-HtmlReport -Devices $sortedResults -NetworkConfig $netConfig -FilePath $autoHtml -ScanDurationSec $scanDuration -WanInfo $wanInfo
+        Generate-HtmlReport -Devices $sortedResults -NetworkConfig $netConfig -FilePath $autoHtml -ScanDurationSec $scanDuration -WanInfo $wanInfo -WifiInfo $wifiInfo -NearbyWifi $nearbyWifi
         $generatedHtmlPath = $autoHtml
 
         # 2. CSV Report
@@ -2096,7 +2515,12 @@ function Invoke-NetworkScanner {
         # 3. JSON Device Report
         $sortedResults | ConvertTo-Json -Depth 4 | Out-File -FilePath $autoJson -Encoding utf8
 
-        # 3b. JSON Network & WAN Metadata Report
+        # 3b. JSON Wi-Fi Survey Report (if wireless networks discovered)
+        if ($nearbyWifi -and @($nearbyWifi).Count -gt 0) {
+            $nearbyWifi | ConvertTo-Json -Depth 4 | Out-File -FilePath $autoWifiJson -Encoding utf8
+        }
+
+        # 3c. JSON Network & WAN Metadata Report
         $netSummaryObj = [PSCustomObject]@{
             ScanTimestamp   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
             ScanDurationSec = $scanDuration
@@ -2106,6 +2530,11 @@ function Invoke-NetworkScanner {
             LocalIP         = $netConfig.LocalIP
             DiscoveredCount = $sortedResults.Count
             ExternalWAN     = if ($wanInfo) { $wanInfo } else { $null }
+            WifiContext     = [PSCustomObject]@{
+                Connected      = if ($wifiInfo) { $wifiInfo } else { $null }
+                NearbyCount    = @($nearbyWifi).Count
+                NearbyNetworks = $nearbyWifi
+            }
         }
         $netSummaryObj | ConvertTo-Json -Depth 4 | Out-File -FilePath $autoNetJson -Encoding utf8
 
@@ -2118,6 +2547,28 @@ function Invoke-NetworkScanner {
         [void]$txtSummary.AppendLine("Interface  : $($netConfig.InterfaceAlias)")
         [void]$txtSummary.AppendLine("Gateway IP : $($netConfig.GatewayIP)")
         [void]$txtSummary.AppendLine("This PC IP : $($netConfig.LocalIP)")
+        if ($wifiInfo -and $wifiInfo.IsConnected) {
+            [void]$txtSummary.AppendLine("-----------------------------------------------------------------")
+            [void]$txtSummary.AppendLine("WI-FI ENVIRONMENT & NEARBY ACCESS POINTS")
+            [void]$txtSummary.AppendLine("-----------------------------------------------------------------")
+            [void]$txtSummary.AppendLine("Connected  : $($wifiInfo.SSID) (BSSID: $($wifiInfo.BSSID) - $($wifiInfo.Vendor))")
+            $txtLink = if ($wifiInfo.ReceiveRateMbps -and $wifiInfo.TransmitRateMbps) { " | Link: Rx $($wifiInfo.ReceiveRateMbps) Mbps / Tx $($wifiInfo.TransmitRateMbps) Mbps" } else { "" }
+            $txtRssi = if ($wifiInfo.Rssi) { " ($($wifiInfo.Rssi) dBm)" } else { "" }
+            [void]$txtSummary.AppendLine("Signal     : $($wifiInfo.SignalPercent)%$txtRssi$txtLink")
+            [void]$txtSummary.AppendLine("Radio/Chan : $($wifiInfo.RadioType) | Band: $($wifiInfo.Band) | Channel: $($wifiInfo.Channel)")
+            [void]$txtSummary.AppendLine("Security   : $($wifiInfo.Authentication) ($($wifiInfo.Cipher))")
+        }
+        if ($nearbyWifi -and @($nearbyWifi).Count -gt 0) {
+            [void]$txtSummary.AppendLine("Visible Access Points ($(@($nearbyWifi).Count) APs):")
+            $idx = 1
+            foreach ($nw in $nearbyWifi) {
+                $star = if ($nw.IsConnected) { "*" } else { " " }
+                $ssidN = if ($nw.SSID.Length -gt 20) { $nw.SSID.Substring(0,19) + "…" } else { $nw.SSID }
+                $venN = if ($nw.Vendor.Length -gt 16) { $nw.Vendor.Substring(0,15) + "…" } else { $nw.Vendor }
+                [void]$txtSummary.AppendLine(("{0,2}{1,-1} {2,-20} {3,-18} {4,-12} {5,-8} {6,-10} {7,-14} {8}" -f $idx, $star, $ssidN, $nw.BSSID, $nw.SignalBars, $nw.Channel, $nw.RadioType, $nw.Authentication, $venN))
+                $idx++
+            }
+        }
         if ($wanInfo -and $wanInfo.IsConnected) {
             [void]$txtSummary.AppendLine("-----------------------------------------------------------------")
             [void]$txtSummary.AppendLine("Public IP  : $($wanInfo.IP)")
@@ -2160,10 +2611,13 @@ function Invoke-NetworkScanner {
 
         if (-not $SilentMode) {
             Write-Host " [REPORTS] Saved unique scan to: $scanFolder" -ForegroundColor Cyan
-            Write-Host "    |-- report.html       (Interactive HTML Dashboard with WAN Intelligence)" -ForegroundColor DarkCyan
+            Write-Host "    |-- report.html       (Interactive HTML Dashboard with WAN & Wi-Fi Intelligence)" -ForegroundColor DarkCyan
             Write-Host "    |-- devices.csv       (CSV Spreadsheet)" -ForegroundColor DarkCyan
             Write-Host "    |-- devices.json      (JSON Device Dataset)" -ForegroundColor DarkCyan
-            Write-Host "    |-- network_info.json (Network & WAN Metadata)" -ForegroundColor DarkCyan
+            if ($nearbyWifi -and @($nearbyWifi).Count -gt 0) {
+                Write-Host "    |-- wifi_survey.json  (Nearby Wi-Fi Environment & SSIDs)" -ForegroundColor DarkCyan
+            }
+            Write-Host "    |-- network_info.json (Network, Wi-Fi & WAN Metadata)" -ForegroundColor DarkCyan
             Write-Host "    |-- summary.txt       (Text Summary Log)" -ForegroundColor DarkCyan
             Write-Host ""
         }
@@ -2171,7 +2625,7 @@ function Invoke-NetworkScanner {
 
     # Custom Additional File Exports
     if ($CustomHtmlPath) {
-        Generate-HtmlReport -Devices $sortedResults -NetworkConfig $netConfig -FilePath $CustomHtmlPath -ScanDurationSec $scanDuration -WanInfo $wanInfo
+        Generate-HtmlReport -Devices $sortedResults -NetworkConfig $netConfig -FilePath $CustomHtmlPath -ScanDurationSec $scanDuration -WanInfo $wanInfo -WifiInfo $wifiInfo -NearbyWifi $nearbyWifi
         if (-not $SilentMode) { Write-Host " Additional HTML saved to: $CustomHtmlPath" -ForegroundColor Cyan }
     }
 
@@ -2284,12 +2738,19 @@ function Start-InteractiveMenu {
             $script:LastWanCheck = Get-Date
         }
 
+        # Quick Wi-Fi link check
+        $menuWifi = Get-ConnectedWifiInfo
+
         Write-Host ""
         Write-Host "=================================================================" -ForegroundColor Cyan
         Write-Host " [SCRY]" -ForegroundColor Cyan
         Write-Host "=================================================================" -ForegroundColor Cyan
         if ($currentCfg) {
-            Write-Host " Target Interface : " -NoNewline; Write-Host "$($currentCfg.InterfaceAlias)" -ForegroundColor Yellow
+            $ifDisplay = "$($currentCfg.InterfaceAlias)"
+            if ($menuWifi -and $menuWifi.IsConnected -and ($currentCfg.InterfaceAlias -match 'Wi-Fi|Wireless|WLAN' -or $menuWifi.Name -eq $currentCfg.InterfaceAlias)) {
+                $ifDisplay += " (Connected: `"$($menuWifi.SSID)`" | $($menuWifi.SignalPercent)% Signal)"
+            }
+            Write-Host " Target Interface : " -NoNewline; Write-Host "$ifDisplay" -ForegroundColor Yellow
             Write-Host " Target Subnet    : " -NoNewline; Write-Host "$($currentCfg.SubnetCidr)" -ForegroundColor Yellow -NoNewline
             if ($currentCfg.HostCount) { Write-Host " ($($currentCfg.HostCount) Hosts)" -ForegroundColor DarkGray } else { Write-Host "" }
             Write-Host " Default Gateway  : " -NoNewline; Write-Host "$($currentCfg.GatewayIP)" -ForegroundColor Yellow
@@ -2307,13 +2768,14 @@ function Start-InteractiveMenu {
             }
             Write-Host "-----------------------------------------------------------------" -ForegroundColor DarkGray
         }
-        Write-Host " [1] Start Scan  (Standard: Devices, Hostnames, Top Ports) [Default]" -ForegroundColor Green
-        Write-Host " [2] Deep Scan   (Comprehensive: 25+ Ports & Web Banners)" -ForegroundColor Magenta
-        Write-Host " [3] Quick Scan  (Fast Discovery: ARP + Ping + DNS)" -ForegroundColor Yellow
+        Write-Host " [1] Start Scan   (Standard: Devices, Hostnames, Top Ports) [Default]" -ForegroundColor Green
+        Write-Host " [2] Deep Scan    (Comprehensive: 25+ Ports & Web Banners)" -ForegroundColor Magenta
+        Write-Host " [3] Quick Scan   (Fast Discovery: ARP + Ping + DNS)" -ForegroundColor Yellow
         Write-Host " [4] Switch Adapter / Custom Subnet" -ForegroundColor White
+        Write-Host " [5] Wi-Fi Survey (Nearby SSIDs, Channels & Signal Strengths)" -ForegroundColor Cyan
         Write-Host " [0] Exit" -ForegroundColor DarkGray
         Write-Host "=================================================================" -ForegroundColor Cyan
-        Write-Host -NoNewline " Select an option [0-4] (Press ENTER for [1]): "
+        Write-Host -NoNewline " Select an option [0-5] (Press ENTER for [1]): "
 
         $choice = Read-Host
 
@@ -2374,11 +2836,12 @@ function Start-InteractiveMenu {
                 Write-Host "-----------------------------------------------------------------" -ForegroundColor DarkGray
                 Write-Host " [A] Scan ALL Active Adapters Sequentially" -ForegroundColor Cyan
                 Write-Host " [C] Custom Subnet (e.g. 192.168.1.0/24 or 10.0.0.1-50)" -ForegroundColor White
+                Write-Host " [W] Wi-Fi Survey (Nearby SSIDs & Access Points)" -ForegroundColor Cyan
                 Write-Host " [R] Renew DHCP Lease & Flush DNS" -ForegroundColor Yellow
                 Write-Host " [D] Detailed Network Diagnostic & Route Status" -ForegroundColor Gray
                 Write-Host " [M] Back to Main Menu" -ForegroundColor DarkGray
                 Write-Host "=================================================================" -ForegroundColor Cyan
-                Write-Host -NoNewline " Choose an option [1-$($allIfs.Count)], [A], [C], [R], [D], or [M]: "
+                Write-Host -NoNewline " Choose an option [1-$($allIfs.Count)], [A], [C], [W], [R], [D], or [M]: "
                 $ifChoice = Read-Host
 
                 if ($ifChoice -match '^[0-9]+$') {
@@ -2405,6 +2868,9 @@ function Start-InteractiveMenu {
                         $selectedInterface = $null
                         Write-Host " [+] Target subnet set to: $selectedSubnet" -ForegroundColor Green
                     }
+                } elseif ($ifChoice -match '^[wW]') {
+                    $null = Show-WifiSurvey -BaseReportFolder $DefaultReportDir
+                    Pause-MenuPrompt
                 } elseif ($ifChoice -match '^[rR]') {
                     Write-Host ""
                     Ensure-NetworkConnection -PreferredInterface $selectedInterface -ForceRenew
@@ -2418,7 +2884,12 @@ function Start-InteractiveMenu {
                 }
             }
 
-            { $_ -in "5", "r", "renew", "dhcp" } {
+            { $_ -in "5", "w", "wifi", "survey" } {
+                $null = Show-WifiSurvey -BaseReportFolder $DefaultReportDir
+                Pause-MenuPrompt
+            }
+
+            { $_ -in "r", "renew", "dhcp" } {
                 Write-Host ""
                 Ensure-NetworkConnection -PreferredInterface $selectedInterface -ForceRenew
                 $script:CachedWanInfo = $null
@@ -2459,7 +2930,7 @@ function Start-InteractiveMenu {
             }
 
             default {
-                Write-Host "Invalid option. Please choose [0-4]." -ForegroundColor Red
+                Write-Host "Invalid option. Please choose [0-5]." -ForegroundColor Red
                 Start-Sleep -Seconds 1
             }
         }
@@ -2470,6 +2941,29 @@ function Start-InteractiveMenu {
 # 8. MAIN SCRIPT ENTRY POINT
 # ====================================================================
 $isDirectCli = ($PSBoundParameters.Count -gt 0) -and (-not $Menu)
+
+if ($WifiOnly) {
+    if ($Quiet) {
+        $connW = Get-ConnectedWifiInfo
+        $connB = if ($connW -and $connW.IsConnected) { $connW.BSSID } else { "" }
+        return Get-NearbyWifiNetworks -ConnectedBssid $connB -DoOnlineLookup:$OnlineLookup
+    } else {
+        $res = Show-WifiSurvey -DoOnlineLookup:$OnlineLookup -BaseReportFolder $ReportDir
+        if ($ExportCsv) {
+            $res | Select-Object Status, SSID, BSSID, Vendor, SignalPercent, Channel, Band, RadioType, Authentication, Encryption, IsConnected |
+                Export-Csv -Path $ExportCsv -NoTypeInformation -Encoding utf8
+            Write-Host " [+] Wi-Fi Survey CSV saved to: $ExportCsv" -ForegroundColor Cyan
+        }
+        if ($ExportJson) {
+            $res | ConvertTo-Json -Depth 4 | Out-File -FilePath $ExportJson -Encoding utf8
+            Write-Host " [+] Wi-Fi Survey JSON saved to: $ExportJson" -ForegroundColor Cyan
+        }
+        if ($ShowGrid) {
+            $res | Out-GridView -Title "Nearby Wi-Fi Networks"
+        }
+        return $res
+    }
+}
 
 if ($isDirectCli -or $NonInteractive) {
     if ($AllInterfaces) {
@@ -2495,7 +2989,8 @@ if ($isDirectCli -or $NonInteractive) {
                 -BypassDhcpCheck:$SkipDhcpCheck `
                 -DhcpWaitSec $DhcpTimeoutSec `
                 -SkipWanLookup:$SkipWanCheck `
-                -WanTimeout $WanTimeoutSec
+                -WanTimeout $WanTimeoutSec `
+                -SkipWifiScan:$SkipWifi
             if ($r) { foreach ($item in $r) { $allRes.Add($item) } }
         }
         return $allRes
@@ -2521,7 +3016,8 @@ if ($isDirectCli -or $NonInteractive) {
             -BypassDhcpCheck:$SkipDhcpCheck `
             -DhcpWaitSec $DhcpTimeoutSec `
             -SkipWanLookup:$SkipWanCheck `
-            -WanTimeout $WanTimeoutSec
+            -WanTimeout $WanTimeoutSec `
+            -SkipWifiScan:$SkipWifi
     }
 } else {
     # Launch interactive menu loop
