@@ -1,5 +1,7 @@
 # SCRY 1.0
 
+[![License: Lagom](https://img.shields.io/badge/license-lagom-9E2B25)](https://klppl.github.io/lagom-license/)
+
 SCRY is a PowerShell tool for network discovery and wireless reconnaissance. The tool scans local subnets, surveys nearby Wi-Fi networks and access points, identifies connected devices, and queries public network routing data.
 
 ### Collected Device Data
